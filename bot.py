@@ -1,163 +1,125 @@
-import os
-import time
-import traceback
-
-print("=== BTC + ETH 10m 6-9 CONFIRMATION BOT STARTING ===", flush=True)
-
-try:
-    import ccxt
-    import requests
-    print("Imports OK", flush=True)
-except Exception as e:
-    print("IMPORT ERROR:", repr(e), flush=True)
-    raise
+import os, time
+from datetime import datetime, timezone
+import ccxt
+import requests
 
 SYMBOLS = ["BTC/USDT:USDT", "ETH/USDT:USDT"]
-TIMEFRAME = "10m"
-SCAN_SECONDS = max(15, int(os.getenv("SCAN_SECONDS", "30")))
-COOLDOWN_SECONDS = max(60, int(os.getenv("COOLDOWN_SECONDS", "900")))
+DISPLAY_TIMEFRAME = "10m"
+SOURCE_TIMEFRAME = "5m"
+SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "30"))
 LEVERAGE = int(os.getenv("LEVERAGE", "30"))
-TG = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-CHAT = os.getenv("CHAT_ID", "").strip()
-last_sent = {}
-last_heartbeat = 0.0
-HEARTBEAT_SECONDS = 300
+HISTORY_5M = int(os.getenv("HISTORY_5M", "240"))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "")).strip()
 
-print("Symbols:", ", ".join(SYMBOLS), flush=True)
-print("Timeframe:", TIMEFRAME, flush=True)
-print("Rule: 6th candle changes color; 7th-9th stay same as 6th", flush=True)
-print("Leverage:", f"{LEVERAGE}x", flush=True)
-print("Telegram configured:", bool(TG and CHAT), flush=True)
-print("Chat ID configured:", CHAT if CHAT else "<empty>", flush=True)
+exchange = ccxt.mexc({"enableRateLimit": True, "options": {"defaultType": "swap"}})
+sent_keys = set()
+last_error = {}
 
-ex = ccxt.mexc({"enableRateLimit": True, "options": {"defaultType": "swap"}})
+def now_ms(): return int(time.time() * 1000)
+def utc_text(ms): return datetime.fromtimestamp(ms/1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-def send(text):
-    if not TG or not CHAT:
-        print("[TG] NOT CONFIGURED", flush=True)
-        return False
+def color(c):
+    o, cl = float(c[1]), float(c[4])
+    return "GREEN" if cl > o else "RED" if cl < o else "DOJI"
+
+def emoji(c): return "🟢" if c == "GREEN" else "🔴" if c == "RED" else "⚪"
+
+def build_10m(candles5):
+    # Exact UTC 10m candles: 00+05, 10+15, 20+25, ...
+    by_ts = {int(c[0]): c for c in candles5}
+    out = []
+    five = 5 * 60 * 1000
+    now = now_ms()
+    for ts, a in sorted(by_ts.items()):
+        minute = (ts // 60000) % 60
+        if minute % 10 != 0 or ts % 60000 != 0:
+            continue
+        b = by_ts.get(ts + five)
+        if b is None or ts + 2*five > now:
+            continue
+        out.append([ts, float(a[1]), max(float(a[2]), float(b[2])), min(float(a[3]), float(b[3])), float(b[4]), float(a[5]) + float(b[5])])
+    return out
+
+def fetch_10m(symbol):
+    raw = exchange.fetch_ohlcv(symbol, SOURCE_TIMEFRAME, limit=HISTORY_5M)
+    candles = build_10m(raw)
+    if len(candles) < 15:
+        raise RuntimeError(f"not enough completed 10m candles: {len(candles)}")
+    return candles
+
+def find_signal(candles):
+    if len(candles) < 10: return None
+    i = len(candles) - 10  # #9 is the latest closed 10m candle
+    start = candles[i]
+    c6, c7, c8, c9 = candles[i+6], candles[i+7], candles[i+8], candles[i+9]
+    cs, c6c, c7c, c8c, c9c = color(start), color(c6), color(c7), color(c8), color(c9)
+    if cs not in ("GREEN", "RED") or c6c not in ("GREEN", "RED"): return None
+    # Start must be the last candle of its same-color run.
+    if i + 1 < len(candles) and color(candles[i+1]) == cs: return None
+    # #6 changes color; #7-#9 stay with #6.
+    if c6c == cs or not (c7c == c6c and c8c == c6c and c9c == c6c): return None
+    return {"side": "LONG" if c6c == "GREEN" else "SHORT", "start": start, "c6": c6, "c7": c7, "c8": c8, "c9": c9, "start_color": cs}
+
+def telegram(text):
+    if not TELEGRAM_BOT_TOKEN or not CHAT_ID:
+        print("[TELEGRAM] not configured"); return
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TG}/sendMessage",
-            json={"chat_id": CHAT, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=10,
-        )
-        print(f"[TG] HTTP {r.status_code}", flush=True)
-        if not r.ok:
-            print("[TG] RESPONSE", r.text[:500], flush=True)
-            return False
-        return True
-    except Exception as e:
-        print("[TG ERROR]", repr(e), flush=True)
-        return False
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True}, timeout=15)
+        if not r.ok: print(f"[TELEGRAM ERROR] {r.status_code}: {r.text}")
+    except Exception as e: print(f"[TELEGRAM ERROR] {e}")
 
-def fetch(symbol, limit=100):
+def message(symbol, s):
+    coin = symbol.split('/')[0]
+    side = s["side"]
+    c6,c7,c8,c9 = s["c6"],s["c7"],s["c8"],s["c9"]
+    entry = float(c9[4])
+    title = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
+    return (f"{title}\n\n{coin}USDT Futures\nTimeframe: 10m\nLeverage: {LEVERAGE}x\n\n"
+            f"6→9 CONFIRMATION\nStart: {emoji(s['start_color'])} {s['start_color']}\n"
+            f"6: {emoji(color(c6))} {color(c6)}\n7: {emoji(color(c7))} {color(c7)}\n"
+            f"8: {emoji(color(c8))} {color(c8)}\n9: {emoji(color(c9))} {color(c9)}\n\n"
+            f"Entry: {entry}\nSignal candle #9 closed: {utc_text(c9[0])}\n\n"
+            f"Трейдер Василь Павлів\n@vasylpavliv\nt.me/vasylpavliv")
+
+def process(symbol):
     try:
-        return ex.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
+        candles = fetch_10m(symbol)
+        s = find_signal(candles)
+        if not s: return
+        key = (symbol, s["side"], int(s["c9"][0]))
+        if key in sent_keys: return
+        sent_keys.add(key)
+        text = message(symbol, s)
+        print("\n=== SIGNAL ===\n" + text + "\n==============\n")
+        telegram(text)
     except Exception as e:
-        print(f"[FETCH ERROR] {symbol}: {e}", flush=True)
-        return None
+        msg = str(e)
+        if last_error.get(symbol) != msg:
+            print(f"[FETCH ERROR] {symbol}: {msg}")
+            last_error[symbol] = msg
 
-def color(candle):
-    o, c = float(candle[1]), float(candle[4])
-    if c > o:
-        return "GREEN"
-    if c < o:
-        return "RED"
-    return "DOJI"
+def main():
+    print("=== BTC + ETH 10m 6-9 CONFIRMATION BOT STARTING ===")
+    print("Imports OK")
+    print(f"Symbols: {', '.join(SYMBOLS)}")
+    print("Timeframe: 10m (built from closed 5m candles)")
+    print("Rule: 6th candle changes color; 7th-9th stay same as 6th")
+    print(f"Leverage: {LEVERAGE}x")
+    print(f"Telegram configured: {bool(TELEGRAM_BOT_TOKEN and CHAT_ID)}")
+    print(f"Chat ID configured: {CHAT_ID or 'NO'}")
+    print("Connecting to MEXC...")
+    exchange.load_markets()
+    print(f"MEXC connected. Markets loaded: {len(exchange.markets)}")
+    print("=== BTC + ETH 10m 6-9 CONFIRMATION BOT RUNNING ===")
+    n=0
+    while True:
+        t=time.time()
+        for symbol in SYMBOLS: process(symbol)
+        n+=1
+        if n % 10 == 0: print(f"[HEARTBEAT] BTC+ETH 10m 6-9 BOT alive | scan={SCAN_SECONDS}s")
+        elapsed=time.time()-t; sleep=max(1, SCAN_SECONDS-elapsed)
+        print(f"[CYCLE] completed in {elapsed:.1f}s | sleep {sleep:.1f}s")
+        time.sleep(sleep)
 
-def detect(symbol):
-    rows = fetch(symbol, 100)
-    if not rows or len(rows) < 15:
-        return None
-
-    closed = rows[:-1]  # exclude unfinished 10m candle
-
-    # Test each closed candle as a potential start.
-    # Start = LAST candle of a same-color run.
-    # Example: GREEN GREEN GREEN -> start from 3rd GREEN.
-    for i in range(max(0, len(closed) - 30), len(closed) - 9):
-        start_color = color(closed[i])
-        if start_color == "DOJI":
-            continue
-        if i + 1 < len(closed) and color(closed[i + 1]) == start_color:
-            continue
-
-        c6 = color(closed[i + 6])
-        c7 = color(closed[i + 7])
-        c8 = color(closed[i + 8])
-        c9 = color(closed[i + 9])
-
-        # 6th MUST change color relative to start.
-        if c6 == "DOJI" or c6 == start_color:
-            continue
-        # 7th, 8th and 9th MUST be the same color as 6th.
-        if c7 != c6 or c8 != c6 or c9 != c6:
-            continue
-        # Signal only when candle 9 is the latest fully closed candle.
-        if i + 9 != len(closed) - 1:
-            continue
-
-        side = "LONG" if c6 == "GREEN" else "SHORT"
-        icon = "🟢" if side == "LONG" else "🔴"
-        candle_time = int(closed[i + 9][0])
-        key = (symbol, side, candle_time)
-        now = time.time()
-        if now - last_sent.get(key, 0) < COOLDOWN_SECONDS:
-            return None
-        last_sent[key] = now
-
-        entry = float(closed[i + 9][4])
-        msg = (
-            f"{icon} <b>{side}</b>\n\n"
-            f"<b>{symbol}</b>\n"
-            f"Timeframe: {TIMEFRAME}\n\n"
-            f"<b>6→9 CONFIRMATION</b>\n"
-            f"Start candle: {start_color}\n"
-            f"6th candle: {c6} — color changed\n"
-            f"7th candle: {c7}\n"
-            f"8th candle: {c8}\n"
-            f"9th candle: {c9}\n\n"
-            f"Entry: {entry:.8g}\n"
-            f"Leverage: {LEVERAGE}x\n\n"
-            f"Signal only after 9th candle close.\n\n"
-            f"<b>BTC + ETH 10m 6-9 BOT</b>"
-        )
-        print(f"[SIGNAL] {symbol} {side} start={start_color} 6={c6} 7={c7} 8={c8} 9={c9} entry={entry:.8g}", flush=True)
-        sent = send(msg)
-        if not sent:
-            print(f"[SIGNAL WARNING] {symbol} {side} generated but Telegram send failed", flush=True)
-        return sent
-    return None
-
-def heartbeat():
-    global last_heartbeat
-    now = time.time()
-    if now - last_heartbeat >= HEARTBEAT_SECONDS:
-        last_heartbeat = now
-        print(f"[HEARTBEAT] BTC+ETH 10m 6-9 BOT alive | scan={SCAN_SECONDS}s", flush=True)
-
-print("Connecting to MEXC...", flush=True)
-try:
-    ex.load_markets()
-    print(f"MEXC connected. Markets loaded: {len(ex.markets)}", flush=True)
-except Exception as e:
-    print("[MEXC INIT ERROR]", repr(e), flush=True)
-    traceback.print_exc()
-    raise
-
-print("=== BTC + ETH 10m 6-9 CONFIRMATION BOT RUNNING ===", flush=True)
-
-while True:
-    cycle_start = time.time()
-    for symbol in SYMBOLS:
-        try:
-            detect(symbol)
-        except Exception as e:
-            print(f"[DETECT ERROR] {symbol}: {e}", flush=True)
-            traceback.print_exc()
-    heartbeat()
-    elapsed = time.time() - cycle_start
-    sleep_for = max(1, SCAN_SECONDS - elapsed)
-    print(f"[CYCLE] completed in {elapsed:.1f}s | sleep {sleep_for:.1f}s", flush=True)
-    time.sleep(sleep_for)
+if __name__ == "__main__": main()
