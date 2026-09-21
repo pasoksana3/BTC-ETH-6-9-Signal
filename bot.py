@@ -14,6 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "")).strip()
 
 exchange = ccxt.mexc({"enableRateLimit": True, "options": {"defaultType": "swap"}})
 sent_keys = set()
+warning_keys = set()
 last_error = {}
 
 def now_ms(): return int(time.time() * 1000)
@@ -47,6 +48,71 @@ def fetch_10m(symbol):
     if len(candles) < 15:
         raise RuntimeError(f"not enough completed 10m candles: {len(candles)}")
     return candles
+
+def build_current_10m(candles5):
+    # Build the currently forming 10m candle from its two 5m candles.
+    # Used only for the 2-minute pre-signal warning, never for the final signal.
+    by_ts = {int(c[0]): c for c in candles5}
+    five = 5 * 60 * 1000
+    now = now_ms()
+    current_start = (now // (10 * 60 * 1000)) * (10 * 60 * 1000)
+    a = by_ts.get(current_start)
+    b = by_ts.get(current_start + five)
+    if a is None:
+        return None
+    # The 5m candle may still be forming, so its close/high/low are live values.
+    if b is not None:
+        return [current_start, float(a[1]), max(float(a[2]), float(b[2])),
+                min(float(a[3]), float(b[3])), float(b[4]),
+                float(a[5]) + float(b[5])]
+    # During the first half of the 10m candle only the first 5m candle exists.
+    return [current_start, float(a[1]), float(a[2]), float(a[3]),
+            float(a[4]), float(a[5])]
+
+def check_pre_signal(symbol):
+    raw = exchange.fetch_ohlcv(symbol, SOURCE_TIMEFRAME, limit=HISTORY_5M)
+    closed = build_10m(raw)
+    current = build_current_10m(raw)
+    if current is None or len(closed) < 8:
+        return
+
+    # Warning only in the final 2 minutes of the current 10m candle.
+    close_ms = int(current[0]) + 10 * 60 * 1000
+    remaining_ms = close_ms - now_ms()
+    if remaining_ms > 2 * 60 * 1000 or remaining_ms <= 0:
+        return
+
+    # Candidate sequence: Start, then candles #2-#5, #6, #7, #8, current #9.
+    # We need the previous 8 completed 10m candles plus current #9.
+    seq = closed[-8:] + [current]
+    start, c6, c7, c8, c9 = seq[0], seq[6], seq[7], seq[8], seq[8]
+    # Correct indexing for a 9-candle sequence: start is #1, c6 is index 5,
+    # c7 index 6, c8 index 7, c9 current.
+    start = seq[0]
+    c6, c7, c8 = seq[5], seq[6], seq[7]
+    cs, c6c, c7c, c8c, c9c = color(start), color(c6), color(c7), color(c8), color(c9)
+    if cs not in ("GREEN", "RED") or c6c not in ("GREEN", "RED"):
+        return
+    if c6c == cs or c7c != c6c or c8c != c6c or c9c != c6c:
+        return
+
+    # Start must be the last candle of its same-color run.
+    if len(closed) >= 9 and color(closed[-9]) == cs:
+        return
+
+    key = (symbol, int(current[0]))
+    if key in warning_keys:
+        return
+    warning_keys.add(key)
+
+    coin = symbol.split('/')[0]
+    text = (f"Всі готові?\n\n"
+            f"Скоро дам СИГНАЛ!\n\n"
+            f"{coin}USDT Futures\n\n"
+            f"Timeframe: 10m\n\n"
+            f"⚠️ Сигнал буде тільки після закриття свічки.")
+    print("\n=== PRE-SIGNAL WARNING ===\n" + text + "\n==========================\n")
+    telegram(text)
 
 def find_signal(candles):
     if len(candles) < 10: return None
@@ -84,6 +150,8 @@ def message(symbol, s):
 
 def process(symbol):
     try:
+        # Pre-signal warning is checked independently from the final closed-candle signal.
+        check_pre_signal(symbol)
         candles = fetch_10m(symbol)
         s = find_signal(candles)
         if not s: return
