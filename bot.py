@@ -59,7 +59,7 @@ def find_signal(candles):
     if i + 1 < len(candles) and color(candles[i+1]) == cs: return None
     # #6 changes color; #7-#9 stay with #6.
     if c6c == cs or not (c7c == c6c and c8c == c6c and c9c == c6c): return None
-    return {"side": "LONG" if c6c == "GREEN" else "SHORT", "start": start, "c6": c6, "c7": c7, "c8": c8, "c9": c9, "start_color": cs}
+    return {"side": "LONG" if cs == "GREEN" else "SHORT", "start": start, "c6": c6, "c7": c7, "c8": c8, "c9": c9, "start_color": cs}
 
 def telegram(text):
     if not TELEGRAM_BOT_TOKEN or not CHAT_ID:
@@ -104,7 +104,7 @@ def main():
     print("Imports OK")
     print(f"Symbols: {', '.join(SYMBOLS)}")
     print("Timeframe: 10m (built from closed 5m candles)")
-    print("Rule: 6th candle changes color; 7th-9th stay same as 6th")
+    print("Rule: Start color sets direction; 6th changes color; 7th-9th stay same as 6th")
     print(f"Leverage: {LEVERAGE}x")
     print(f"Telegram configured: {bool(TELEGRAM_BOT_TOKEN and CHAT_ID)}")
     print(f"Chat ID configured: {CHAT_ID or 'NO'}")
