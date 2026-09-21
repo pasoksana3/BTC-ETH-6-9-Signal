@@ -1,31 +1,24 @@
-# BTC + ETH 10m 6-9 Confirmation Bot
+# BTC + ETH 10m 6→9 Confirmation Bot V4
 
-Railway-ready, signal-only MEXC Futures Telegram bot.
+Railway signal-only bot for BTCUSDT and ETHUSDT Futures.
 
-## Data
-MEXC public Futures OHLCV via CCXT. No MEXC API keys are required.
-
-## 10m construction
-MEXC 5m candles are paired into exact UTC 10m candles: 00+05, 10+15, 20+25, 30+35, 40+45, 50+55. Only fully closed 10m candles are used.
-
-## Algorithm
-1. Start = last candle of a same-color run.
-2. Candle #6 must change color from start.
-3. Candles #7, #8 and #9 must all match candle #6.
-4. Signal only after #9 closes.
-5. Start GREEN -> #6-#9 RED = SHORT.
-6. Start RED -> #6-#9 GREEN = LONG.
-7. Candles #1-#5 have no color requirement.
-8. Doji cannot confirm.
+## Logic
+- 10m candles are built from 5m MEXC candles.
+- Start candle is the last candle in a same-color run.
+- GREEN Start => LONG.
+- RED Start => SHORT.
+- Candle 6 must change color from Start.
+- Candles 7, 8, 9 must remain the same color as candle 6.
+- Final signal is sent only after candle 9 closes.
+- About 2 minutes before candle 9 closes, if the currently forming candle 9 still matches candle 6, a pre-signal warning is sent.
+- If candle 9 changes color before close, no final signal is sent.
+- Warning and final signal are deduplicated.
+- Display leverage is 30x by default.
+- No MEXC API keys are required; only public market data is used.
 
 ## Railway variables
-Required:
-TELEGRAM_BOT_TOKEN=...
-CHAT_ID=...
-
-Optional:
+TELEGRAM_BOT_TOKEN=your_bot_token
+CHAT_ID=-5370612713
 LEVERAGE=30
 SCAN_SECONDS=30
 HISTORY_5M=240
-
-Do not commit the Telegram token to GitHub.
