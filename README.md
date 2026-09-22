@@ -1,24 +1,24 @@
-# BTC + ETH 10m 6→15 PRE2MIN + WIN Bot
+# BTC + ETH 10m 6→9 Confirmation Bot V4
 
-Signal-only Telegram bot for MEXC Futures using BTCUSDT and ETHUSDT.
+Railway signal-only bot for BTCUSDT and ETHUSDT Futures.
 
 ## Logic
-- Build closed 10m candles from 5m candles.
-- Start candle is the last candle of its same-color run.
-- #6 must be the opposite color of Start.
-- #7, #8, #9 must match #6.
-- About 2 minutes before #9 closes, if the forming #9 still matches #6, send the pre-signal warning.
-- No final signal is sent at #9.
-- #10, #11, #12, #13, #14, #15 must ALL match the Start candle color.
-- Only after #15 closes is the setup confirmed and the final WIN message sent.
-- Direction: GREEN Start = LONG; RED Start = SHORT.
+- 10m candles are built from 5m MEXC candles.
+- Start candle is the last candle in a same-color run.
+- GREEN Start => LONG.
+- RED Start => SHORT.
+- Candle 6 must change color from Start.
+- Candles 7, 8, 9 must remain the same color as candle 6.
+- Final signal is sent only after candle 9 closes.
+- About 2 minutes before candle 9 closes, if the currently forming candle 9 still matches candle 6, a pre-signal warning is sent.
+- If candle 9 changes color before close, no final signal is sent.
+- Warning and final signal are deduplicated.
+- Display leverage is 30x by default.
+- No MEXC API keys are required; only public market data is used.
 
 ## Railway variables
-- TELEGRAM_BOT_TOKEN
-- CHAT_ID (default/fallback TELEGRAM_CHAT_ID)
-- SCAN_SECONDS=30
-- LEVERAGE=30
-- PRE_MIN_SECONDS=90
-- PRE_MAX_SECONDS=150
-
-No automatic trading. Public MEXC market data only.
+TELEGRAM_BOT_TOKEN=your_bot_token
+CHAT_ID=-5370612713
+LEVERAGE=30
+SCAN_SECONDS=30
+HISTORY_5M=240
