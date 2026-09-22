@@ -111,27 +111,55 @@ def fetch_live_price(symbol):
 
 
 def find_signal(candles):
-    if len(candles) < 10:
+    """Confirm the full 15-candle pattern after candle #15 closes.
+
+    Pattern:
+      #1 start color (GREEN/RED)
+      #6 opposite color
+      #7-#9 same color as #6
+      #10-#15 same color as the start candle
+    Direction is determined only by the start candle color.
+    """
+    if len(candles) < 15:
         return None
-    i = len(candles) - 10
+
+    i = len(candles) - 15
     start = candles[i]
-    c6, c7, c8, c9 = candles[i + 6], candles[i + 7], candles[i + 8], candles[i + 9]
+    c6, c7, c8, c9 = (
+        candles[i + 5], candles[i + 6], candles[i + 7], candles[i + 8]
+    )
+    c10, c11, c12, c13, c14, c15 = (
+        candles[i + 9], candles[i + 10], candles[i + 11],
+        candles[i + 12], candles[i + 13], candles[i + 14]
+    )
+
     cs = color(start)
     c6c, c7c, c8c, c9c = color(c6), color(c7), color(c8), color(c9)
+    later = [color(c) for c in (c10, c11, c12, c13, c14, c15)]
 
     if cs not in ("GREEN", "RED") or c6c not in ("GREEN", "RED"):
         return None
+
+    # Start must be the last candle of its same-color run.
     if i + 1 < len(candles) and color(candles[i + 1]) == cs:
         return None
+
+    # #6 must change color; #7-#9 must remain with #6.
     if c6c == cs:
         return None
     if not (c7c == c6c and c8c == c6c and c9c == c6c):
         return None
 
+    # #10-#15 must all return to the START color.
+    if not all(c == cs for c in later):
+        return None
+
     side = "LONG" if cs == "GREEN" else "SHORT"
     return {
         "side": side, "start": start, "c6": c6, "c7": c7,
-        "c8": c8, "c9": c9, "start_color": cs,
+        "c8": c8, "c9": c9, "c10": c10, "c11": c11,
+        "c12": c12, "c13": c13, "c14": c14, "c15": c15,
+        "start_color": cs,
     }
 
 
@@ -195,61 +223,51 @@ def warning_message(symbol):
 def message(symbol, s):
     coin = symbol.split("/")[0]
     side = s["side"]
-    c6, c7, c8, c9 = s["c6"], s["c7"], s["c8"], s["c9"]
-    entry = float(c9[4])
-    title = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
-    return (
-        f"{title}\n\n{coin}USDT Futures\n"
-        "Timeframe: 10m\n"
-        f"Leverage: {LEVERAGE}x\n\n"
-        "6→9 CONFIRMATION\n"
-        f"Start: {emoji(s['start_color'])} {s['start_color']}\n"
-        f"6: {emoji(color(c6))} {color(c6)}\n"
-        f"7: {emoji(color(c7))} {color(c7)}\n"
-        f"8: {emoji(color(c8))} {color(c8)}\n"
-        f"9: {emoji(color(c9))} {color(c9)}\n\n"
-        f"Entry: {entry}\n"
-        f"Signal candle #9 closed: {utc_text(c9[0])}\n\n"
-        "Трейдер Василь Павлів\n@vasylpavliv\nt.me/vasylpavliv"
-    )
+    title = "🟢 LONG — WIN" if side == "LONG" else "🔴 SHORT — WIN"
+    candles = [s["c6"], s["c7"], s["c8"], s["c9"], s["c10"], s["c11"], s["c12"], s["c13"], s["c14"], s["c15"]]
+    labels = list(range(6, 16))
+    lines = [
+        title, "", f"{coin}USDT Futures", "Timeframe: 10m",
+        f"Leverage: {LEVERAGE}x", "",
+        "15-CANDLE CONFIRMATION",
+        f"Start: {emoji(s['start_color'])} {s['start_color']}",
+    ]
+    for n, c in zip(labels, candles):
+        lines.append(f"{n}: {emoji(color(c))} {color(c)}")
+    lines += [
+        "",
+        "🏆 WIN — підтверджено до закриття 15-ї свічки.",
+        f"Confirmation candle #15 closed: {utc_text(s['c15'][0])}",
+        "",
+        "Трейдер Василь Павлів",
+        "@vasylpavliv",
+        "t.me/vasylpavliv",
+    ]
+    return "\n".join(lines)
 
 
-def check_win(candles, signal):
-    """Check candles #10-#13 after a confirmed signal.
-
-    WIN criterion is explicit and configurable: at least one closing price
-    reaches +/- WIN_MOVE_PCT from the #9 close in the signal direction.
-    """
-    if len(candles) < 10 + WIN_CHECK_CANDLES:
-        return None
-    c9 = signal["c9"]
-    idx = next((i for i, c in enumerate(candles) if int(c[0]) == int(c9[0])), None)
-    if idx is None or idx + WIN_CHECK_CANDLES >= len(candles):
-        return None
-    entry = float(c9[4])
-    future = candles[idx + 1: idx + 1 + WIN_CHECK_CANDLES]
-    if len(future) < WIN_CHECK_CANDLES:
-        return None
-    if signal["side"] == "LONG":
-        target = entry * (1 + WIN_MOVE_PCT)
-        hit = any(float(c[4]) >= target for c in future)
-    else:
-        target = entry * (1 - WIN_MOVE_PCT)
-        hit = any(float(c[4]) <= target for c in future)
-    return {"win": hit, "entry": entry, "target": target, "last": future[-1], "c9_ts": c9[0]}
-
-
-def win_message(symbol, signal, result):
+def win_message(symbol, signal):
     coin = symbol.split("/")[0]
-    label = "✅ WIN" if result["win"] else "❌ LOSS"
+    side = signal["side"]
     return (
-        f"{label}\n\n{coin}USDT Futures\n"
+        "✅ WIN\n\n"
+        f"{coin}USDT Futures\n"
         "Timeframe: 10m\n\n"
-        f"Entry: {result['entry']}\n"
-        f"Target: {result['target']} ({WIN_MOVE_PCT*100:.2f}%)\n"
-        f"Checked through candle #9 + {WIN_CHECK_CANDLES} candles\n\n"
-        "6→9 CONFIRMATION\n"
-        f"Result: {'WIN' if result['win'] else 'LOSS'}"
+        f"Direction: {side}\n"
+        "CONFIRMED THROUGH CANDLE #15\n\n"
+        f"Start: {emoji(signal['start_color'])} {signal['start_color']}\n"
+        f"6: {emoji(color(signal['c6']))} {color(signal['c6'])}\n"
+        f"7: {emoji(color(signal['c7']))} {color(signal['c7'])}\n"
+        f"8: {emoji(color(signal['c8']))} {color(signal['c8'])}\n"
+        f"9: {emoji(color(signal['c9']))} {color(signal['c9'])}\n"
+        f"10: {emoji(color(signal['c10']))} {color(signal['c10'])}\n"
+        f"11: {emoji(color(signal['c11']))} {color(signal['c11'])}\n"
+        f"12: {emoji(color(signal['c12']))} {color(signal['c12'])}\n"
+        f"13: {emoji(color(signal['c13']))} {color(signal['c13'])}\n"
+        f"14: {emoji(color(signal['c14']))} {color(signal['c14'])}\n"
+        f"15: {emoji(color(signal['c15']))} {color(signal['c15'])}\n\n"
+        "🏆 WIN — послідовність підтверджена до 15-ї свічки.\n\n"
+        "Трейдер Василь Павлів\n@vasylpavliv\nt.me/vasylpavliv"
     )
 
 
@@ -271,25 +289,19 @@ def process(symbol):
                     warning_keys.add(key)
                 print("\n=== PRE-SIGNAL ===\n" + text + "\n=================\n", flush=True)
 
+        # Final confirmation happens only after candle #15 closes.
         s = find_signal(completed)
         if not s:
             return
-        key = (symbol, s["side"], int(s["c9"][0]))
-        if key not in sent_keys:
-            text = message(symbol, s)
-            if telegram(text):
-                sent_keys.add(key)
-            print("\n=== SIGNAL ===\n" + text + "\n==============\n", flush=True)
 
-        # WIN/LOSS is sent only after the full #10-#13 check is available.
-        wkey = (symbol, int(s["c9"][0]), "WIN")
-        if wkey not in win_keys:
-            result = check_win(completed, s)
-            if result is not None:
-                text = win_message(symbol, s, result)
-                if telegram(text):
-                    win_keys.add(wkey)
-                print("\n=== RESULT ===\n" + text + "\n==============\n", flush=True)
+        key = (symbol, s["side"], int(s["c15"][0]), "WIN")
+        if key in sent_keys:
+            return
+
+        text = message(symbol, s)
+        if telegram(text):
+            sent_keys.add(key)
+        print("\n=== FINAL WIN ===\n" + text + "\n=================\n", flush=True)
 
     except Exception as e:
         msg = str(e)
@@ -303,9 +315,9 @@ def main():
     print("Imports OK", flush=True)
     print(f"Symbols: {', '.join(SYMBOLS)}", flush=True)
     print("Timeframe: 10m (built from 5m candles)", flush=True)
-    print("Rule: Start color sets direction; #6 changes; #7-#9 match #6", flush=True)
+    print("Rule: Start color sets direction; #6 changes; #7-#9 match #6; #10-#15 match Start", flush=True)
     print(f"Pre-signal: {PRE_MIN_SECONDS}-{PRE_MAX_SECONDS}s before #9 close", flush=True)
-    print(f"WIN check: candles #10-#{9+WIN_CHECK_CANDLES}, move={WIN_MOVE_PCT*100:.2f}%", flush=True)
+    print("Final confirmation: candle #15 must close with #10-#15 matching Start color", flush=True)
     print(f"Leverage: {LEVERAGE}x", flush=True)
     print(f"Telegram configured: {bool(TELEGRAM_BOT_TOKEN and CHAT_ID)}", flush=True)
     print(f"Chat ID configured: {CHAT_ID or 'NO'}", flush=True)
