@@ -47,7 +47,7 @@ def color(c):
 
 
 def emoji(c):
-    return "🟢" if c == "GREEN" else "🔴" if c == "RED" else "⚪"
+    return "ð¢" if c == "GREEN" else "ð´" if c == "RED" else "âª"
 
 
 def build_10m(candles5):
@@ -115,95 +115,81 @@ def find_signal(candles):
 
     Pattern:
       #1 start color (GREEN/RED)
-      #6-#8 opposite color to the start
-      #9-#15 same color as the start
-    Direction is determined by the start candle color.
+      #6 opposite color
+      #7-#9 same color as #6
+      #10-#15 same color as the start candle
+    Direction is determined only by the start candle color.
     """
     if len(candles) < 15:
         return None
 
     i = len(candles) - 15
     start = candles[i]
-    c6, c7, c8 = candles[i + 5], candles[i + 6], candles[i + 7]
-    c9, c10, c11, c12, c13, c14, c15 = (
-        candles[i + 8], candles[i + 9], candles[i + 10],
-        candles[i + 11], candles[i + 12], candles[i + 13],
-        candles[i + 14],
+    c6, c7, c8, c9 = (
+        candles[i + 5], candles[i + 6], candles[i + 7], candles[i + 8]
+    )
+    c10, c11, c12, c13, c14, c15 = (
+        candles[i + 9], candles[i + 10], candles[i + 11],
+        candles[i + 12], candles[i + 13], candles[i + 14]
     )
 
     cs = color(start)
-    first_group = [color(c) for c in (c6, c7, c8)]
-    second_group = [color(c) for c in (c9, c10, c11, c12, c13, c14, c15)]
+    c6c, c7c, c8c, c9c = color(c6), color(c7), color(c8), color(c9)
+    later = [color(c) for c in (c10, c11, c12, c13, c14, c15)]
 
-    if cs not in ("GREEN", "RED"):
-        return None
-    if not all(c in ("GREEN", "RED") for c in first_group + second_group):
+    if cs not in ("GREEN", "RED") or c6c not in ("GREEN", "RED"):
         return None
 
     # Start must be the last candle of its same-color run.
     if i + 1 < len(candles) and color(candles[i + 1]) == cs:
         return None
 
-    opposite = "RED" if cs == "GREEN" else "GREEN"
-
-    # #6-#8 must all be opposite to the start.
-    if not all(c == opposite for c in first_group):
+    # #6 must change color; #7-#9 must remain with #6.
+    if c6c == cs:
+        return None
+    if not (c7c == c6c and c8c == c6c and c9c == c6c):
         return None
 
-    # #9-#15 must all return to the START color.
-    if not all(c == cs for c in second_group):
+    # #10-#15 must all return to the START color.
+    if not any(c == cs for c in later):
         return None
 
     side = "LONG" if cs == "GREEN" else "SHORT"
     return {
-        "side": side, "start": start,
-        "c6": c6, "c7": c7, "c8": c8,
-        "c9": c9, "c10": c10, "c11": c11,
+        "side": side, "start": start, "c6": c6, "c7": c7,
+        "c8": c8, "c9": c9, "c10": c10, "c11": c11,
         "c12": c12, "c13": c13, "c14": c14, "c15": c15,
         "start_color": cs,
     }
 
+
 def pre_signal(candles_completed, current_10m):
-    """Warn once during the 90-150s window before #8 closes.
-
-    At warning time:
-      #1 = start
-      #6-#7 are already closed and opposite the start
-      #8 is live and must currently also be opposite the start
-    """
-    if current_10m is None or len(candles_completed) < 7:
+    """Warn once during the 90-150s window before #9 closes."""
+    if current_10m is None or len(candles_completed) < 8:
         return None
 
-    seq7 = candles_completed[-7:]  # #2..#7
-    start, c6, c7, c8 = seq7[0], seq7[5], seq7[6], current_10m
-    cs, c6c, c7c, c8c = color(start), color(c6), color(c7), color(c8)
+    seq8 = candles_completed[-8:]  # #2..#8
+    start, c6, c7, c8, c9 = seq8[0], seq8[5], seq8[6], seq8[7], current_10m
+    cs, c6c, c7c, c8c, c9c = color(start), color(c6), color(c7), color(c8), color(c9)
 
-    if cs not in ("GREEN", "RED"):
+    if cs not in ("GREEN", "RED") or c6c not in ("GREEN", "RED") or c9c not in ("GREEN", "RED"):
         return None
-    if c6c not in ("GREEN", "RED") or c7c not in ("GREEN", "RED") or c8c not in ("GREEN", "RED"):
+    if len(candles_completed) >= 9 and color(candles_completed[-9]) == cs:
         return None
-
-    # Start must be the last candle of its same-color run.
-    if len(candles_completed) >= 8 and color(candles_completed[-8]) == cs:
+    if c6c == cs or c7c != c6c or c8c != c6c or c9c != c6c:
         return None
 
-    opposite = "RED" if cs == "GREEN" else "GREEN"
-
-    # #6-#8 must all currently be opposite to the start.
-    if not (c6c == opposite and c7c == opposite and c8c == opposite):
-        return None
-
-    # Warning is about candle #8 closing.
-    close_ms = int(start[0]) + 8 * 10 * 60 * 1000
+    close_ms = int(start[0]) + 9 * 10 * 60 * 1000
     remaining = (close_ms - now_ms()) / 1000.0
     if not (PRE_MIN_SECONDS <= remaining <= PRE_MAX_SECONDS):
         return None
 
     return {
         "side": "LONG" if cs == "GREEN" else "SHORT",
-        "start_color": cs, "c6": c6, "c7": c7,
-        "c8": c8, "close_ms": close_ms,
+        "start_color": cs, "c6": c6, "c7": c7, "c8": c8,
+        "c9": c9, "close_ms": close_ms,
     }
+
 
 def telegram(text):
     if not TELEGRAM_BOT_TOKEN or not CHAT_ID:
@@ -226,18 +212,18 @@ def telegram(text):
 def warning_message(symbol):
     coin = symbol.split("/")[0]
     return (
-        "Всі готові?\n\n"
-        "Скоро дам СИГНАЛ!\n\n"
+        "ÐÑÑ Ð³Ð¾ÑÐ¾Ð²Ñ?\n\n"
+        "Ð¡ÐºÐ¾ÑÐ¾ Ð´Ð°Ð¼ Ð¡ÐÐÐÐÐ!\n\n"
         f"{coin}USDT Futures\n\n"
         "Timeframe: 10m\n\n"
-        "⚠️ Сигнал буде тільки після закриття 8-ї свічки."
+        "â ï¸ Ð¡Ð¸Ð³Ð½Ð°Ð» Ð±ÑÐ´Ðµ ÑÑÐ»ÑÐºÐ¸ Ð¿ÑÑÐ»Ñ Ð·Ð°ÐºÑÐ¸ÑÑÑ ÑÐ²ÑÑÐºÐ¸."
     )
 
 
 def message(symbol, s):
     coin = symbol.split("/")[0]
     side = s["side"]
-    title = "🟢 LONG — WIN" if side == "LONG" else "🔴 SHORT — WIN"
+    title = "ð¢ LONG â WIN" if side == "LONG" else "ð´ SHORT â WIN"
     candles = [s["c6"], s["c7"], s["c8"], s["c9"], s["c10"], s["c11"], s["c12"], s["c13"], s["c14"], s["c15"]]
     labels = list(range(6, 16))
     lines = [
@@ -250,10 +236,10 @@ def message(symbol, s):
         lines.append(f"{n}: {emoji(color(c))} {color(c)}")
     lines += [
         "",
-        "🏆 WIN — послідовність підтверджена до закриття 15-ї свічки.",
+        "ð WIN â Ð¿ÑÐ´ÑÐ²ÐµÑÐ´Ð¶ÐµÐ½Ð¾ Ð´Ð¾ Ð·Ð°ÐºÑÐ¸ÑÑÑ 15-Ñ ÑÐ²ÑÑÐºÐ¸.",
         f"Confirmation candle #15 closed: {utc_text(s['c15'][0])}",
         "",
-        "Трейдер Василь Павлів",
+        "Ð¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²",
         "@vasylpavliv",
         "t.me/vasylpavliv",
     ]
@@ -264,7 +250,7 @@ def win_message(symbol, signal):
     coin = symbol.split("/")[0]
     side = signal["side"]
     return (
-        "✅ WIN\n\n"
+        "â WIN\n\n"
         f"{coin}USDT Futures\n"
         "Timeframe: 10m\n\n"
         f"Direction: {side}\n"
@@ -280,8 +266,8 @@ def win_message(symbol, signal):
         f"13: {emoji(color(signal['c13']))} {color(signal['c13'])}\n"
         f"14: {emoji(color(signal['c14']))} {color(signal['c14'])}\n"
         f"15: {emoji(color(signal['c15']))} {color(signal['c15'])}\n\n"
-        "🏆 WIN — послідовність підтверджена до 15-ї свічки.\n\n"
-        "Трейдер Василь Павлів\n@vasylpavliv\nt.me/vasylpavliv"
+        "ð WIN â Ð¿Ð¾ÑÐ»ÑÐ´Ð¾Ð²Ð½ÑÑÑÑ Ð¿ÑÐ´ÑÐ²ÐµÑÐ´Ð¶ÐµÐ½Ð° Ð´Ð¾ 15-Ñ ÑÐ²ÑÑÐºÐ¸.\n\n"
+        "Ð¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nt.me/vasylpavliv"
     )
 
 
@@ -325,20 +311,20 @@ def process(symbol):
 
 
 def main():
-    print("=== BTC + ETH 10m 6-8 / 9-15 PRE2MIN + WIN BOT STARTING ===", flush=True)
+    print("=== BTC + ETH 10m 6-9 PRE2MIN + WIN BOT STARTING ===", flush=True)
     print("Imports OK", flush=True)
     print(f"Symbols: {', '.join(SYMBOLS)}", flush=True)
     print("Timeframe: 10m (built from 5m candles)", flush=True)
-    print("Rule: Start color sets direction; #6-#8 opposite Start; #9-#15 match Start", flush=True)
-    print(f"Pre-signal: {PRE_MIN_SECONDS}-{PRE_MAX_SECONDS}s before #8 close", flush=True)
-    print("Final confirmation: candle #15 must close with #10-#15 matching Start color", flush=True)
+    print("Rule: Start color sets direction; #6 changes; #7-#9 match #6; #10-#15 match Start", flush=True)
+    print(f"Pre-signal: {PRE_MIN_SECONDS}-{PRE_MAX_SECONDS}s before #9 close", flush=True)
+    print("Final confirmation: candle #15 must close; WIN if ANY #10-#15 matches Start color", flush=True)
     print(f"Leverage: {LEVERAGE}x", flush=True)
     print(f"Telegram configured: {bool(TELEGRAM_BOT_TOKEN and CHAT_ID)}", flush=True)
     print(f"Chat ID configured: {CHAT_ID or 'NO'}", flush=True)
     print("Connecting to MEXC...", flush=True)
     exchange.load_markets()
     print(f"MEXC connected. Markets loaded: {len(exchange.markets)}", flush=True)
-    print("=== BTC + ETH 10m 6-8 / 9-15 PRE2MIN + WIN BOT RUNNING ===", flush=True)
+    print("=== BTC + ETH 10m 6-9 PRE2MIN + WIN BOT RUNNING ===", flush=True)
     n = 0
     while True:
         t = time.time()
