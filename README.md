@@ -1,80 +1,10 @@
-# BTC + ETH 10m Rule #1 Bot
+BTC + ETH 10m RULE #9
 
-Цей бот працює ОДНАКОВО для BTCUSDT та ETHUSDT і реалізує тільки Правило №1.
-
-## Логіка
-
-Start → #1 → #2 → #3 → #4 → #5 → #6 → #7 → #8 → #9
-
-Обов'язкова умова:
-
-**#6 = #7 = #8 = #9**
-
-Усі чотири свічки мають бути одного кольору і протилежного кольору до Start.
-
-### LONG
-Start 🟢
-→ #6 🔴
-→ #7 🔴
-→ #8 🔴
-→ #9 🔴
-
-Після повного закриття #9 → SIGNAL LONG.
-
-### SHORT
-Start 🔴
-→ #6 🟢
-→ #7 🟢
-→ #8 🟢
-→ #9 🟢
-
-Після повного закриття #9 → SIGNAL SHORT.
-
-## PRE-ALERT
-
-PRE-ALERT приходить тільки в останню хвилину #9.
-
-Тобто:
-- #6 вже закрита
-- #7 вже закрита
-- #8 вже закрита
-- #9 ще формується
-- #9 має залишатися того самого кольору
-
-Текст попередження прямо вказує, що сигнал буде тільки після закриття #9.
-
-## WIN / LOSS
-
-Після сигналу перевіряються ТІЛЬКИ #10–#15.
-
-### LONG
-- хоча б одна 🟢 у #10–#15 → WIN
-- якщо всі #10–#15 🔴 → LOSS
-
-### SHORT
-- хоча б одна 🔴 у #10–#15 → WIN
-- якщо всі #10–#15 🟢 → LOSS
-
-Якщо #6–#9 не одного кольору — сигналу немає взагалі.
-
-## Важливо
-
-#10–#15 НЕ використовуються для формування сигналу. Вони тільки визначають WIN/LOSS.
-
-Бот не торгує автоматично.
-
-## Railway
-
-1. Завантажити файли в GitHub.
-2. Створити Railway service з цим репозиторієм.
-3. Додати Variables:
-   - TELEGRAM_BOT_TOKEN
-   - TELEGRAM_CHAT_ID
-   - MEXC_SYMBOLS=BTC_USDT,ETH_USDT
-   - POLL_SECONDS=15
-4. Start Command:
-   `python bot.py`
-
-State-файли створюються окремо:
-- state_BTC_USDT.json
-- state_ETH_USDT.json
+- Start defines direction.
+- #6, #7, #8 and #9 MUST all be the same color.
+- That color must be opposite Start.
+- PRE-ALERT only during the final minute of live #9.
+- SIGNAL only after #9 fully closes.
+- Result is checked ONLY on #10, #11, #12, #13, #14, #15.
+- If any of #10-#15 matches the Start color: WIN.
+- If none matches by the close of #15: LOSS.
