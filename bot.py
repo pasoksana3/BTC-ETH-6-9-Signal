@@ -295,18 +295,10 @@ def warning_message(symbol, s):
     coin = symbol.split("/")[0]
 
     return (
-        "Всі готові?
-
-"
-        "Скоро дам СИГНАЛ!
-
-"
-        f"{coin}USDT Futures
-
-"
-        "Timeframe: 10m
-
-"
+        "Всі готові?\n\n"
+        "Скоро дам СИГНАЛ!\n\n"
+        f"{coin}USDT Futures\n\n"
+        "Timeframe: 10m\n\n"
         "⚠️ Сигнал буде тільки після закриття свічки."
     )
 
@@ -325,44 +317,23 @@ def message(symbol, s):
     title = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
 
     return (
-        f"{title}
-
-"
-        f"{coin}USDT Futures
-"
-        "Timeframe: 10m
-"
-        f"Leverage: {LEVERAGE}x
-
-"
-        "6→9 CONFIRMATION
-
-"
+        f"{title}\n\n"
+        f"{coin}USDT Futures\n"
+        "Timeframe: 10m\n"
+        f"Leverage: {LEVERAGE}x\n\n"
+        "6→9 CONFIRMATION\n\n"
         f"Start: {emoji(s['start_color'])} "
-        f"{s['start_color']}
-
-"
-        f"6: {emoji(color(c6))} {color(c6)}
-"
-        f"7: {emoji(color(c7))} {color(c7)}
-"
-        f"8: {emoji(color(c8))} {color(c8)}
-"
-        f"9: {emoji(color(c9))} {color(c9)}
-
-"
-        f"Entry: {entry}
-"
-        f"Signal candle #9 closed: {utc_text(c9[0])}
-
-"
-        "Трейдер Василь Павлів
-"
-        "@vasylpavliv
-"
+        f"{s['start_color']}\n\n"
+        f"6: {emoji(color(c6))} {color(c6)}\n"
+        f"7: {emoji(color(c7))} {color(c7)}\n"
+        f"8: {emoji(color(c8))} {color(c8)}\n"
+        f"9: {emoji(color(c9))} {color(c9)}\n\n"
+        f"Entry: {entry}\n"
+        f"Signal candle #9 closed: {utc_text(c9[0])}\n\n"
+        "Трейдер Василь Павлів\n"
+        "@vasylpavliv\n"
         "t.me/vasylpavliv"
     )
-
 
 def process(symbol):
     try:
@@ -400,13 +371,9 @@ def process(symbol):
                     sent_keys.add(signal_key)
 
                     print(
-                        "
-=== SIGNAL ===
-"
+                        "\n=== SIGNAL ===\n"
                         + text
-                        + "
-==============
-",
+                        + "\n==============\n",
                         flush=True
                     )
 
@@ -448,13 +415,9 @@ def process(symbol):
                     warning_keys.add(warning_key)
 
                     print(
-                        "
-=== PRE-SIGNAL ===
-"
+                        "\n=== PRE-SIGNAL ===\n"
                         + text
-                        + "
-=================
-",
+                        + "\n=================\n",
                         flush=True
                     )
 
