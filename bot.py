@@ -180,8 +180,8 @@ def pre_signal(candles_completed, current_10m):
     """
     PRE-ALERT:
     #9 is still forming.
-    Warning is sent approximately 1–3 minutes
-    before the end of #9.
+    Warning is sent only during the final 60 seconds
+    of candle #9.
     """
 
     if current_10m is None:
@@ -233,13 +233,19 @@ def pre_signal(candles_completed, current_10m):
     if c9c != c6c:
         return None
 
-    # #9 closes 90 minutes after Start.
-    close_ms = int(start[0]) + 9 * 10 * 60 * 1000
+    # The current candle MUST be exactly #9 relative to Start.
+    expected_c9_ts = int(start[0]) + 8 * 10 * 60 * 1000
 
-    remaining = (close_ms - now_ms()) / 1000.0
+    if int(c9[0]) != expected_c9_ts:
+        return None
 
-    # PRE from 3 minutes to 1 minute before #9 closes.
-    if not (60 <= remaining <= 180):
+    # #9 closes 10 minutes after its own start.
+    c9_close_ms = int(c9[0]) + 10 * 60 * 1000
+
+    remaining = (c9_close_ms - now_ms()) / 1000.0
+
+    # PRE only during the last 60 seconds of #9.
+    if not (0 < remaining <= 60):
         return None
 
     side = "LONG" if cs == "GREEN" else "SHORT"
@@ -251,7 +257,7 @@ def pre_signal(candles_completed, current_10m):
         "c7": c7,
         "c8": c8,
         "c9": c9,
-        "close_ms": close_ms,
+        "close_ms": c9_close_ms,
     }
 
 
@@ -289,10 +295,18 @@ def warning_message(symbol, s):
     coin = symbol.split("/")[0]
 
     return (
-        "Всі готові?\n\n"
-        "Скоро дам СИГНАЛ!\n\n"
-        f"{coin}USDT Futures\n\n"
-        "Timeframe: 10m\n\n"
+        "Всі готові?
+
+"
+        "Скоро дам СИГНАЛ!
+
+"
+        f"{coin}USDT Futures
+
+"
+        "Timeframe: 10m
+
+"
         "⚠️ Сигнал буде тільки після закриття свічки."
     )
 
@@ -311,21 +325,41 @@ def message(symbol, s):
     title = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
 
     return (
-        f"{title}\n\n"
-        f"{coin}USDT Futures\n"
-        "Timeframe: 10m\n"
-        f"Leverage: {LEVERAGE}x\n\n"
-        "6→9 CONFIRMATION\n\n"
+        f"{title}
+
+"
+        f"{coin}USDT Futures
+"
+        "Timeframe: 10m
+"
+        f"Leverage: {LEVERAGE}x
+
+"
+        "6→9 CONFIRMATION
+
+"
         f"Start: {emoji(s['start_color'])} "
-        f"{s['start_color']}\n\n"
-        f"6: {emoji(color(c6))} {color(c6)}\n"
-        f"7: {emoji(color(c7))} {color(c7)}\n"
-        f"8: {emoji(color(c8))} {color(c8)}\n"
-        f"9: {emoji(color(c9))} {color(c9)}\n\n"
-        f"Entry: {entry}\n"
-        f"Signal candle #9 closed: {utc_text(c9[0])}\n\n"
-        "Трейдер Василь Павлів\n"
-        "@vasylpavliv\n"
+        f"{s['start_color']}
+
+"
+        f"6: {emoji(color(c6))} {color(c6)}
+"
+        f"7: {emoji(color(c7))} {color(c7)}
+"
+        f"8: {emoji(color(c8))} {color(c8)}
+"
+        f"9: {emoji(color(c9))} {color(c9)}
+
+"
+        f"Entry: {entry}
+"
+        f"Signal candle #9 closed: {utc_text(c9[0])}
+
+"
+        "Трейдер Василь Павлів
+"
+        "@vasylpavliv
+"
         "t.me/vasylpavliv"
     )
 
@@ -366,9 +400,13 @@ def process(symbol):
                     sent_keys.add(signal_key)
 
                     print(
-                        "\n=== SIGNAL ===\n"
+                        "
+=== SIGNAL ===
+"
                         + text
-                        + "\n==============\n",
+                        + "
+==============
+",
                         flush=True
                     )
 
@@ -410,9 +448,13 @@ def process(symbol):
                     warning_keys.add(warning_key)
 
                     print(
-                        "\n=== PRE-SIGNAL ===\n"
+                        "
+=== PRE-SIGNAL ===
+"
                         + text
-                        + "\n=================\n",
+                        + "
+=================
+",
                         flush=True
                     )
 
