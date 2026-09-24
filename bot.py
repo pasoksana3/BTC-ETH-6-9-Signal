@@ -151,7 +151,7 @@ class Engine:
         target_ts=live10['ts']
         if target_ts in self.c:
             return
-        s_ts=target_ts-9*600
+        s_ts=target_ts-8*600
         if s_ts not in self.c:
             return
         sidx=keys.index(s_ts)
@@ -177,6 +177,23 @@ class Engine:
             return
         if target_ts in self.pre_alerted:
             return
+
+        # Register the setup now so that, when #9 closes, evaluate()
+        # can send the final SIGNAL and mark #10 as the entry candle.
+        trigger_idx=keys.index(c6_ts)
+        direction='LONG' if sc=='GREEN' and trig=='RED' else 'SHORT' if sc=='RED' and trig=='GREEN' else None
+        if not direction:
+            return
+        if not any(p.get('start_ts') == s_ts for p in self.pending):
+            self.pending.append({
+                'start_ts': s_ts,
+                'trigger_idx': trigger_idx,
+                'trigger_color': trig,
+                'direction': direction,
+                'signal_sent': False
+            })
+            self.state['pending']=self.pending
+            save_state(self.state, self.state_file)
 
         log.info('PRE-SIGNAL | start=%s %s | live #9=%s %s | ~1m left', utc(start['ts']), sc, utc(target_ts), trig)
         group_text=(f'**Всі готові?**\n'
@@ -212,42 +229,95 @@ class Engine:
         idx=keys.index(ts)
         cur=self.c[ts]
 
-        # Pending signals: #6 is the trigger; #7 and #8 must stay the
-        # same color as #6. Result control is ONLY candles #9..#15.
+        # Pending setups:
+        # #6 = trigger
+        # #7, #8, #9 MUST remain the same color as #6.
+        # After #9 CLOSES -> SEND SIGNAL.
+        # Entry is made on #10.
+        # Result is checked ONLY on #10..#15.
         keep=[]
         for p in self.pending:
             rel=idx-p['trigger_idx']
-
-            # #7, #8 and #9 must match the trigger color. If any changes,
-            # the setup is invalid and no final signal is sent.
             trigger_color=p['trigger_color']
+
+            # Confirmation candles #7, #8, #9.
             if rel in (1, 2, 3):
                 if color(cur) != trigger_color:
-                    log.info('CANCEL SETUP | start=%s | trigger=%s | candle=%d changed color', utc(p['start_ts']), trigger_color, rel+6)
-                else:
-                    # After #9 closes successfully, send the final signal.
-                    if rel == 3 and not p.get('signal_sent', False):
-                        signal_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\nTrigger: candle 6\n\nSignal only - no automatic trading.\n\nТрейдер Василь Павлів\n@vasylpavliv\nhttps://t.me/vasylpavliv')
-                        signal_group_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\n\nSignal only - no automatic trading.\n\nТрейдер Василь Павлів\n@vasylpavliv\nhttps://t.me/vasylpavliv')
-                        tg(signal_text, signal_group_text)
-                        p['signal_sent']=True
-                    keep.append(p)
+                    log.info(
+                        'CANCEL SETUP | %s | start=%s | candle=%d changed color',
+                        self.symbol, utc(p['start_ts']), rel + 6
+                    )
+                    continue
+
+                # #9 has closed correctly: send final signal.
+                # The user opens the position on #10.
+                if rel == 3 and not p.get('signal_sent', False):
+                    signal_text=(
+                        f'SIGNAL {p["direction"]}\n\n'
+                        f'{self.symbol.replace("_USDT","USDT")} Futures\n'
+                        f'Timeframe: 10m\n'
+                        f'Start: {kyiv(p["start_ts"])} Kyiv time\n'
+                        f'Entry: candle #10\n\n'
+                        f'Signal only - no automatic trading.\n\n'
+                        f'Трейдер Василь Павлів\n'
+                        f'@vasylpavliv\n'
+                        f'https://t.me/vasylpavliv'
+                    )
+                    tg(signal_text, signal_text)
+                    p['signal_sent']=True
+                    log.info(
+                        'SIGNAL SENT | %s | %s | start=%s | #9 closed | ENTRY=#10',
+                        self.symbol, p['direction'], utc(p['start_ts'])
+                    )
+
+                keep.append(p)
                 continue
 
-            # Result is checked only on candles #10..#15.
+            # Before #10 there is no result to check.
             if rel < 4:
                 keep.append(p)
                 continue
 
+            # RESULT WINDOW = #10..#15 ONLY.
             want='GREEN' if p['direction']=='LONG' else 'RED'
-            if rel <= 9 and color(cur)==want:
-                log.info('RESULT WIN | %s | start=%s | result candle=%d', p['direction'], utc(p['start_ts']), rel+6)
-                tg(f"WIN\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nResult candle: {rel+6}/15\n\nТрейдер Василь Павлів\n@vasylpavliv\nhttps://t.me/vasylpavliv")
-            elif rel >= 9:
-                log.info('RESULT LOSS | %s | start=%s | no confirmation in candles 10-15', p['direction'], utc(p['start_ts']))
-                tg(f"LOSS\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nNo confirmation in candles 10-15\n\nТрейдер Василь Павлів\n@vasylpavliv\nhttps://t.me/vasylpavliv")
-            else:
-                keep.append(p)
+
+            if rel <= 9:
+                if color(cur) == want:
+                    log.info(
+                        'RESULT WIN | %s | %s | start=%s | result candle=%d',
+                        self.symbol, p['direction'], utc(p['start_ts']), rel + 6
+                    )
+                    tg(
+                        f"WIN\n"
+                        f"{self.symbol.replace('_USDT','USDT')} Futures\n"
+                        f"Direction: {p['direction']}\n"
+                        f"Result candle: {rel+6}/15\n\n"
+                        f"Трейдер Василь Павлів\n"
+                        f"@vasylpavliv\n"
+                        f"https://t.me/vasylpavliv"
+                    )
+                    continue
+
+                if rel < 9:
+                    keep.append(p)
+                    continue
+
+                # #15 closed without a confirming candle.
+                log.info(
+                    'RESULT LOSS | %s | %s | start=%s | no confirmation in candles 10-15',
+                    self.symbol, p['direction'], utc(p['start_ts'])
+                )
+                tg(
+                    f"LOSS\n"
+                    f"{self.symbol.replace('_USDT','USDT')} Futures\n"
+                    f"Direction: {p['direction']}\n"
+                    f"No confirmation in candles 10-15\n\n"
+                    f"Трейдер Василь Павлів\n"
+                    f"@vasylpavliv\n"
+                    f"https://t.me/vasylpavliv"
+                )
+                continue
+
         self.pending=keep
 
         # Start can be either:
@@ -259,7 +329,7 @@ class Engine:
         # reserved only for the result check.
         if idx<6:
             return
-        sidx=idx-6
+        sidx=idx-5
         start=self.c[keys[sidx]]
         sc=color(start)
         if sc not in ('GREEN','RED'):
@@ -289,7 +359,7 @@ def main():
     log.info('Started BTCUSDT + ETHUSDT 10m signal bot v4-fixed (REST polling)')
     log.info('Config: poll=%ss, chats=%d, token_configured=%s', POLL, len(CHAT_IDS), bool(TOKEN))
     log.info('Symbols: %s', ', '.join(SYMBOLS))
-    log.info('Rule: #1 Start | #6 trigger | #7-#9 same color as #6 | #10-#16 result')
+    log.info('Rule: #1 Start | #6 trigger | #7-#9 same color as #6 | #9 CLOSE -> SIGNAL -> ENTRY #10 | RESULT #10-#15')
     if TOKEN and CHAT_IDS:
         tg('BOT ONLINE\nBTCUSDT + ETHUSDT Futures\nSignal bot is active.\nThis test confirms Telegram delivery to all configured chats.')
     last_log={}
