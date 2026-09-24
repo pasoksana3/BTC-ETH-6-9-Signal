@@ -1,390 +1,163 @@
-import os, json, time, logging
-from collections import OrderedDict
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-import requests
-from dotenv import load_dotenv
+import os
+import time
+import traceback
 
-load_dotenv()
-TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
-CHAT_IDS=[x.strip() for x in os.getenv('TELEGRAM_CHAT_ID','').split(',') if x.strip()]
-SYMBOLS=[x.strip().upper() for x in os.getenv('MEXC_SYMBOLS','ETH_USDT,BTC_USDT').split(',') if x.strip()]
-POLL=int(os.getenv('POLL_SECONDS','15'))
-STATE_FILE=os.getenv('STATE_FILE','state.json')
-URL='https://api.mexc.com/api/v1/contract/kline/{symbol}'
+print("=== BTC + ETH 10m 6-9 CONFIRMATION BOT STARTING ===", flush=True)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-log=logging.getLogger('eth-bot')
+try:
+    import ccxt
+    import requests
+    print("Imports OK", flush=True)
+except Exception as e:
+    print("IMPORT ERROR:", repr(e), flush=True)
+    raise
 
-def utc(ts):
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+SYMBOLS = ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+TIMEFRAME = "10m"
+SCAN_SECONDS = max(15, int(os.getenv("SCAN_SECONDS", "30")))
+COOLDOWN_SECONDS = max(60, int(os.getenv("COOLDOWN_SECONDS", "900")))
+LEVERAGE = int(os.getenv("LEVERAGE", "30"))
+TG = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT = os.getenv("CHAT_ID", "").strip()
+last_sent = {}
+last_heartbeat = 0.0
+HEARTBEAT_SECONDS = 300
 
-def kyiv(ts):
-    return datetime.fromtimestamp(ts, tz=ZoneInfo('Europe/Kyiv')).strftime('%Y-%m-%d %H:%M')
+print("Symbols:", ", ".join(SYMBOLS), flush=True)
+print("Timeframe:", TIMEFRAME, flush=True)
+print("Rule: 6th candle changes color; 7th-9th stay same as 6th", flush=True)
+print("Leverage:", f"{LEVERAGE}x", flush=True)
+print("Telegram configured:", bool(TG and CHAT), flush=True)
+print("Chat ID configured:", CHAT if CHAT else "<empty>", flush=True)
 
-def color(c):
-    return 'GREEN' if c['close'] > c['open'] else 'RED' if c['close'] < c['open'] else 'DOJI'
+ex = ccxt.mexc({"enableRateLimit": True, "options": {"defaultType": "swap"}})
 
-def load_state(path=None):
-    path=path or STATE_FILE
-    try:
-        with open(path, encoding='utf8') as f:
-            return json.load(f)
-    except Exception:
-        return {'last_processed_10m': None, 'pending': []}
-
-def save_state(s, path=None):
-    path=path or STATE_FILE
-    with open(path + '.tmp', 'w', encoding='utf8') as f:
-        json.dump(s, f, indent=2)
-    os.replace(path + '.tmp', path)
-
-def tg(text, group_text=None):
-    if not TOKEN or not CHAT_IDS:
-        log.error('TELEGRAM NOT CONFIGURED')
+def send(text):
+    if not TG or not CHAT:
+        print("[TG] NOT CONFIGURED", flush=True)
         return False
-    sent=0
-    for chat_id in CHAT_IDS:
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TG}/sendMessage",
+            json={"chat_id": CHAT, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=10,
+        )
+        print(f"[TG] HTTP {r.status_code}", flush=True)
+        if not r.ok:
+            print("[TG] RESPONSE", r.text[:500], flush=True)
+            return False
+        return True
+    except Exception as e:
+        print("[TG ERROR]", repr(e), flush=True)
+        return False
+
+def fetch(symbol, limit=100):
+    try:
+        return ex.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
+    except Exception as e:
+        print(f"[FETCH ERROR] {symbol}: {e}", flush=True)
+        return None
+
+def color(candle):
+    o, c = float(candle[1]), float(candle[4])
+    if c > o:
+        return "GREEN"
+    if c < o:
+        return "RED"
+    return "DOJI"
+
+def detect(symbol):
+    rows = fetch(symbol, 100)
+    if not rows or len(rows) < 15:
+        return None
+
+    closed = rows[:-1]  # exclude unfinished 10m candle
+
+    # Test each closed candle as a potential start.
+    # Start = LAST candle of a same-color run.
+    # Example: GREEN GREEN GREEN -> start from 3rd GREEN.
+    for i in range(max(0, len(closed) - 30), len(closed) - 9):
+        start_color = color(closed[i])
+        if start_color == "DOJI":
+            continue
+        if i + 1 < len(closed) and color(closed[i + 1]) == start_color:
+            continue
+
+        c6 = color(closed[i + 6])
+        c7 = color(closed[i + 7])
+        c8 = color(closed[i + 8])
+        c9 = color(closed[i + 9])
+
+        # 6th MUST change color relative to start.
+        if c6 == "DOJI" or c6 == start_color:
+            continue
+        # 7th, 8th and 9th MUST be the same color as 6th.
+        if c7 != c6 or c8 != c6 or c9 != c6:
+            continue
+        # Signal only when candle 9 is the latest fully closed candle.
+        if i + 9 != len(closed) - 1:
+            continue
+
+        side = "LONG" if c6 == "GREEN" else "SHORT"
+        icon = "🟢" if side == "LONG" else "🔴"
+        candle_time = int(closed[i + 9][0])
+        key = (symbol, side, candle_time)
+        now = time.time()
+        if now - last_sent.get(key, 0) < COOLDOWN_SECONDS:
+            return None
+        last_sent[key] = now
+
+        entry = float(closed[i + 9][4])
+        msg = (
+            f"{icon} <b>{side}</b>\n\n"
+            f"<b>{symbol}</b>\n"
+            f"Timeframe: {TIMEFRAME}\n\n"
+            f"<b>6→9 CONFIRMATION</b>\n"
+            f"Start candle: {start_color}\n"
+            f"6th candle: {c6} — color changed\n"
+            f"7th candle: {c7}\n"
+            f"8th candle: {c8}\n"
+            f"9th candle: {c9}\n\n"
+            f"Entry: {entry:.8g}\n"
+            f"Leverage: {LEVERAGE}x\n\n"
+            f"Signal only after 9th candle close.\n\n"
+            f"<b>BTC + ETH 10m 6-9 BOT</b>"
+        )
+        print(f"[SIGNAL] {symbol} {side} start={start_color} 6={c6} 7={c7} 8={c8} 9={c9} entry={entry:.8g}", flush=True)
+        sent = send(msg)
+        if not sent:
+            print(f"[SIGNAL WARNING] {symbol} {side} generated but Telegram send failed", flush=True)
+        return sent
+    return None
+
+def heartbeat():
+    global last_heartbeat
+    now = time.time()
+    if now - last_heartbeat >= HEARTBEAT_SECONDS:
+        last_heartbeat = now
+        print(f"[HEARTBEAT] BTC+ETH 10m 6-9 BOT alive | scan={SCAN_SECONDS}s", flush=True)
+
+print("Connecting to MEXC...", flush=True)
+try:
+    ex.load_markets()
+    print(f"MEXC connected. Markets loaded: {len(ex.markets)}", flush=True)
+except Exception as e:
+    print("[MEXC INIT ERROR]", repr(e), flush=True)
+    traceback.print_exc()
+    raise
+
+print("=== BTC + ETH 10m 6-9 CONFIRMATION BOT RUNNING ===", flush=True)
+
+while True:
+    cycle_start = time.time()
+    for symbol in SYMBOLS:
         try:
-            send_text = group_text if (group_text is not None and chat_id.startswith('-')) else text
-            r=requests.post(
-                f'https://api.telegram.org/bot{TOKEN}/sendMessage',
-                json={'chat_id': chat_id, 'text': send_text},
-                timeout=15
-            )
-            if r.ok and r.json().get('ok'):
-                sent += 1
-                log.info('TELEGRAM SENT OK | chat=%s', chat_id)
-            else:
-                log.error('TELEGRAM ERROR | chat=%s | status=%s body=%s', chat_id, r.status_code, r.text[:300])
+            detect(symbol)
         except Exception as e:
-            log.exception('TELEGRAM EXCEPTION | chat=%s: %s', chat_id, e)
-    return sent == len(CHAT_IDS)
-
-def fetch(symbol):
-    r=requests.get(
-        URL.format(symbol=symbol),
-        params={'interval':'Min1', 'limit':300, '_ts':int(time.time()*1000)},
-        headers={'Cache-Control':'no-cache', 'Pragma':'no-cache', 'User-Agent':'ETHUSDT-10m-Signal-Bot/4.0'},
-        timeout=15
-    )
-    r.raise_for_status()
-    p=r.json()
-    data=p.get('data')
-    if not data:
-        raise RuntimeError(f'MEXC empty response: {p}')
-    out=[]
-    if isinstance(data, dict) and isinstance(data.get('time'), list):
-        times=data['time']; opens=data.get('open',[]); closes=data.get('close',[])
-        for i,t in enumerate(times):
-            out.append({'ts':int(t), 'open':float(opens[i]), 'close':float(closes[i])})
-    elif isinstance(data, list):
-        for row in data:
-            if isinstance(row, dict):
-                out.append({'ts':int(row.get('time',row.get('t'))), 'open':float(row.get('open',row.get('o'))), 'close':float(row.get('close',row.get('c')))})
-            else:
-                out.append({'ts':int(row[0]), 'open':float(row[1]), 'close':float(row[2])})
-    else:
-        raise RuntimeError(f'Unknown MEXC data format: {type(data).__name__}')
-    out.sort(key=lambda x:x['ts'])
-    return out
-
-def current_10m(mins):
-    """Build the currently forming 10m candle from 1m data."""
-    if not mins:
-        return None
-    b=(mins[-1]['ts']//600)*600
-    rows=[x for x in mins if (x['ts']//600)*600==b]
-    if not rows:
-        return None
-    rows.sort(key=lambda x:x['ts'])
-    return {'ts':b, 'open':rows[0]['open'], 'close':rows[-1]['close'], 'count':len(rows)}
-
-def agg(mins):
-    buckets=OrderedDict()
-    for c in mins:
-        b=(c['ts']//600)*600
-        buckets.setdefault(b,[]).append(c)
-    now=int(time.time())
-    out=[]
-    for b,rows in buckets.items():
-        if b+600<=now and len(rows)>=9:
-            out.append({'ts':b, 'open':rows[0]['open'], 'close':rows[-1]['close'], 'count':len(rows)})
-    return out
-
-class Engine:
-    def __init__(self, state, state_file, symbol):
-        self.state=state
-        self.state_file=state_file
-        self.symbol=symbol
-        self.c=OrderedDict()
-        self.pending=[]
-        self.initialized=False
-        self.pre_alerted=set()
-
-    def seed(self, closed):
-        """Load current history without generating historical signals/results."""
-        self.c=OrderedDict((x['ts'], x) for x in closed[-150:])
-        self.c=OrderedDict(sorted(self.c.items()))
-        self.pending=[]
-        self.state['pending']=[]
-        self.state['last_processed_10m']=next(reversed(self.c)) if self.c else None
-        save_state(self.state, self.state_file)
-        self.initialized=True
-        if self.c:
-            latest=next(reversed(self.c.values()))
-            log.info('INITIALIZED | history=%d | latest=%s %s | waiting for NEW 10m candle', len(self.c), utc(latest['ts']), color(latest))
-
-    def maybe_pre_alert(self, live10):
-        """At ~1 minute before candle #9 closes, warn only while #6/#7/#8/#9 match."""
-        if not self.initialized or not live10:
-            return
-        # Only send during the final ~1 minute of the current 10m candle (#9).
-        now=time.time()
-        elapsed=now-live10['ts']
-        if elapsed < 540 or elapsed >= 600:
-            return
-
-        keys=list(self.c)
-        # Start is separate and is NOT counted.
-        # Current live candle is candle #9 after the candidate start.
-        target_ts=live10['ts']
-        if target_ts in self.c:
-            return
-        s_ts=target_ts-8*600
-        if s_ts not in self.c:
-            return
-        sidx=keys.index(s_ts)
-        start=self.c[s_ts]
-        sc=color(start)
-        if sc not in ('GREEN','RED'):
-            return
-        # Start must be the last candle of its same-color run.
-        if sidx+1 < len(keys) and color(self.c[keys[sidx+1]]) == sc:
-            return
-
-        c6_ts=target_ts-3*600
-        c7_ts=target_ts-2*600
-        c8_ts=target_ts-1*600
-        if c6_ts not in self.c or c7_ts not in self.c or c8_ts not in self.c:
-            return
-        trig=color(self.c[c6_ts])
-        if trig not in ('GREEN','RED') or trig == sc:
-            return
-        if color(self.c[c7_ts]) != trig or color(self.c[c8_ts]) != trig:
-            return
-        if color(live10) != trig:
-            return
-        if target_ts in self.pre_alerted:
-            return
-
-        # Register the setup now so that, when #9 closes, evaluate()
-        # can send the final SIGNAL and mark #10 as the entry candle.
-        trigger_idx=keys.index(c6_ts)
-        direction='LONG' if sc=='GREEN' and trig=='RED' else 'SHORT' if sc=='RED' and trig=='GREEN' else None
-        if not direction:
-            return
-        if not any(p.get('start_ts') == s_ts for p in self.pending):
-            self.pending.append({
-                'start_ts': s_ts,
-                'trigger_idx': trigger_idx,
-                'trigger_color': trig,
-                'direction': direction,
-                'signal_sent': False
-            })
-            self.state['pending']=self.pending
-            save_state(self.state, self.state_file)
-
-        log.info('PRE-SIGNAL | start=%s %s | live #9=%s %s | ~1m left', utc(start['ts']), sc, utc(target_ts), trig)
-        group_text=(f'**Всі готові?**\n'
-                     f'**Скоро дам СИГНАЛ!**\n\n'
-                     f'{self.symbol.replace("_USDT","USDT")} Futures\n'
-                     'Timeframe: 10m\n\n'
-                     '⚠️ Сигнал буде тільки після закриття свічки.')
-        # Pre-signal announcement is intended for the Telegram group only.
-        tg('', group_text)
-        self.pre_alerted.add(target_ts)
-
-    def ingest_new(self, closed):
-        if not self.initialized:
-            self.seed(closed)
-            return 0
-        known=set(self.c)
-        new=[x for x in closed if x['ts'] not in known]
-        for x in new:
-            self.c[x['ts']]=x
-        self.c=OrderedDict(sorted(self.c.items()))
-        while len(self.c)>150:
-            self.c.popitem(last=False)
-        for x in new:
-            self.evaluate(x['ts'])
-        if new:
-            self.state['pending']=self.pending
-            self.state['last_processed_10m']=new[-1]['ts']
-            save_state(self.state, self.state_file)
-        return len(new)
-
-    def evaluate(self, ts):
-        keys=list(self.c)
-        idx=keys.index(ts)
-        cur=self.c[ts]
-
-        # Pending setups:
-        # #6 = trigger
-        # #7, #8, #9 MUST remain the same color as #6.
-        # After #9 CLOSES -> SEND SIGNAL.
-        # Entry is made on #10.
-        # Result is checked ONLY on #10..#15.
-        keep=[]
-        for p in self.pending:
-            rel=idx-p['trigger_idx']
-            trigger_color=p['trigger_color']
-
-            # Confirmation candles #7, #8, #9.
-            if rel in (1, 2, 3):
-                if color(cur) != trigger_color:
-                    log.info(
-                        'CANCEL SETUP | %s | start=%s | candle=%d changed color',
-                        self.symbol, utc(p['start_ts']), rel + 6
-                    )
-                    continue
-
-                # #9 has closed correctly: send final signal.
-                # The user opens the position on #10.
-                if rel == 3 and not p.get('signal_sent', False):
-                    signal_text=(
-                        f'SIGNAL {p["direction"]}\n\n'
-                        f'{self.symbol.replace("_USDT","USDT")} Futures\n'
-                        f'Timeframe: 10m\n'
-                        f'Start: {kyiv(p["start_ts"])} Kyiv time\n'
-                        f'Entry: candle #10\n\n'
-                        f'Signal only - no automatic trading.\n\n'
-                        f'Трейдер Василь Павлів\n'
-                        f'@vasylpavliv\n'
-                        f'https://t.me/vasylpavliv'
-                    )
-                    tg(signal_text, signal_text)
-                    p['signal_sent']=True
-                    log.info(
-                        'SIGNAL SENT | %s | %s | start=%s | #9 closed | ENTRY=#10',
-                        self.symbol, p['direction'], utc(p['start_ts'])
-                    )
-
-                keep.append(p)
-                continue
-
-            # Before #10 there is no result to check.
-            if rel < 4:
-                keep.append(p)
-                continue
-
-            # RESULT WINDOW = #10..#15 ONLY.
-            want='GREEN' if p['direction']=='LONG' else 'RED'
-
-            if rel <= 9:
-                if color(cur) == want:
-                    log.info(
-                        'RESULT WIN | %s | %s | start=%s | result candle=%d',
-                        self.symbol, p['direction'], utc(p['start_ts']), rel + 6
-                    )
-                    tg(
-                        f"WIN\n"
-                        f"{self.symbol.replace('_USDT','USDT')} Futures\n"
-                        f"Direction: {p['direction']}\n"
-                        f"Result candle: {rel+6}/15\n\n"
-                        f"Трейдер Василь Павлів\n"
-                        f"@vasylpavliv\n"
-                        f"https://t.me/vasylpavliv"
-                    )
-                    continue
-
-                if rel < 9:
-                    keep.append(p)
-                    continue
-
-                # #15 closed without a confirming candle.
-                log.info(
-                    'RESULT LOSS | %s | %s | start=%s | no confirmation in candles 10-15',
-                    self.symbol, p['direction'], utc(p['start_ts'])
-                )
-                tg(
-                    f"LOSS\n"
-                    f"{self.symbol.replace('_USDT','USDT')} Futures\n"
-                    f"Direction: {p['direction']}\n"
-                    f"No confirmation in candles 10-15\n\n"
-                    f"Трейдер Василь Павлів\n"
-                    f"@vasylpavliv\n"
-                    f"https://t.me/vasylpavliv"
-                )
-                continue
-
-        self.pending=keep
-
-        # Start can be either:
-        #   1) an isolated GREEN/RED candle, or
-        #   2) the LAST candle of a consecutive run of the same color.
-        #
-        # Trigger is exactly the 6th subsequent candle. Candles #7, #8 and #9
-        # must keep the same color as the trigger. Candles #10..#15 are
-        # reserved only for the result check.
-        if idx<6:
-            return
-        sidx=idx-5
-        start=self.c[keys[sidx]]
-        sc=color(start)
-        if sc not in ('GREEN','RED'):
-            return
-
-        # If the next candle has the same color, this is NOT the last candle
-        # of the run, so this candidate start is ignored. If the next candle
-        # is opposite color or DOJI, this candle IS the last one of its run.
-        if sidx+1 < len(keys) and color(self.c[keys[sidx+1]]) == sc:
-            return
-
-        trig=color(self.c[keys[idx]])
-        direction='LONG' if sc=='GREEN' and trig=='RED' else 'SHORT' if sc=='RED' and trig=='GREEN' else None
-        if not direction:
-            return
-        if any(p['start_ts']==start['ts'] for p in self.pending):
-            return
-        log.info('TRIGGER CANDIDATE %s | start=%s %s | trigger=%s %s | waiting for #7-#9', direction, utc(start['ts']), sc, utc(ts), trig)
-        self.pending.append({'start_ts':start['ts'], 'trigger_idx':idx, 'trigger_color':trig, 'direction':direction, 'signal_sent':False})
-
-engines={}
-for sym in SYMBOLS:
-    sf=os.getenv(f'STATE_FILE_{sym}', f'state_{sym}.json')
-    engines[sym]=Engine(load_state(sf), sf, sym)
-
-def main():
-    log.info('Started BTCUSDT + ETHUSDT 10m signal bot v4-fixed (REST polling)')
-    log.info('Config: poll=%ss, chats=%d, token_configured=%s', POLL, len(CHAT_IDS), bool(TOKEN))
-    log.info('Symbols: %s', ', '.join(SYMBOLS))
-    log.info('Rule: #1 Start | #6 trigger | #7-#9 same color as #6 | #9 CLOSE -> SIGNAL -> ENTRY #10 | RESULT #10-#15')
-    if TOKEN and CHAT_IDS:
-        tg('BOT ONLINE\nBTCUSDT + ETHUSDT Futures\nSignal bot is active.\nThis test confirms Telegram delivery to all configured chats.')
-    last_log={}
-    while True:
-        for symbol,engine in engines.items():
-            try:
-                mins=fetch(symbol)
-                live10=current_10m(mins)
-                if live10:
-                    engine.maybe_pre_alert(live10)
-                closed=agg(mins)
-                if not closed:
-                    log.warning('%s | MEXC OK but no closed 10m candles yet', symbol)
-                else:
-                    latest=closed[-1]
-                    n=engine.ingest_new(closed)
-                    if n:
-                        log.info('NEW DATA | %s | MEXC 1m=%d | closed_10m=%d | added=%d | latest=%s %s | O=%.4f C=%.4f | pending=%d', symbol, len(mins), len(closed), n, utc(latest['ts']), color(latest), latest['open'], latest['close'], len(engine.pending))
-                    elif time.time()-last_log.get(symbol,0)>=60:
-                        age=int(time.time()-(latest['ts']+600))
-                        log.info('HEARTBEAT OK | %s | MEXC 1m=%d | closed_10m=%d | latest=%s %s | age=%ss | pending=%d', symbol, len(mins), len(closed), utc(latest['ts']), color(latest), max(age,0), len(engine.pending))
-                        last_log[symbol]=time.time()
-            except Exception as e:
-                log.exception('LOOP ERROR %s: %s', symbol, e)
-        time.sleep(POLL)
-
-if __name__=='__main__':
-    main()
+            print(f"[DETECT ERROR] {symbol}: {e}", flush=True)
+            traceback.print_exc()
+    heartbeat()
+    elapsed = time.time() - cycle_start
+    sleep_for = max(1, SCAN_SECONDS - elapsed)
+    print(f"[CYCLE] completed in {elapsed:.1f}s | sleep {sleep_for:.1f}s", flush=True)
+    time.sleep(sleep_for)

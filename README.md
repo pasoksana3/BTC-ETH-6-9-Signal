@@ -1,10 +1,11 @@
-BTC + ETH 10m RULE #9
+# BTC + ETH 10m 6-9 Confirmation Bot
 
-- Start defines direction.
-- #6, #7, #8 and #9 MUST all be the same color.
-- That color must be opposite Start.
-- PRE-ALERT only during the final minute of live #9.
-- SIGNAL only after #9 fully closes.
-- Result is checked ONLY on #10, #11, #12, #13, #14, #15.
-- If any of #10-#15 matches the Start color: WIN.
-- If none matches by the close of #15: LOSS.
+Separate signal-only bot for BTCUSDT and ETHUSDT Futures.
+
+Rule:
+- Start is the last candle of a same-color run.
+- Candle 6 must change color relative to the start.
+- Candles 7, 8 and 9 must all match candle 6.
+- Signal only after candle 9 closes.
+- Public MEXC market data only; no MEXC API keys.
+- Environment: TELEGRAM_BOT_TOKEN, CHAT_ID, LEVERAGE=30, SCAN_SECONDS=30.
