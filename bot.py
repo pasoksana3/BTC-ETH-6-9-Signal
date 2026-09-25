@@ -1,4 +1,4 @@
-import os
+
 import time
 from datetime import datetime, timezone
 import ccxt
@@ -177,119 +177,73 @@ def check_pre_signal(candles):
 
 
 def pre_signal(candles_completed, current_10m):
-    """PRE-ALERT тільки в останню хвилину живої свічки #9."""
-
-    if current_10m is None:
+    """PRE-ALERT тільки в останню хвилину саме живої #9."""
+    if current_10m is None or len(candles_completed) < 8:
         return None
 
-    if len(candles_completed) < 8:
-        return None
-
-    # Поточна жива свічка повинна бути #9.
-    now = time.time()
     target_ts = int(current_10m[0])
-    elapsed = now - (target_ts / 1000.0)
+    now = time.time()
+    elapsed = now - target_ts / 1000.0
 
-    # Попередження тільки в останні 60 секунд #9.
+    # Жива #9: PRE тільки 540-600 сек після її початку.
     if elapsed < 540 or elapsed >= 600:
         return None
 
-    # Якщо ця свічка вже є серед закритих —
-    # вона вже не є живою #9.
+    # #9 не може бути вже закритою.
     if any(int(c[0]) == target_ts for c in candles_completed):
         return None
 
-    # Для #9:
-    #
-    # Start = #1
-    # #2
-    # #3
-    # #4
-    # #5
-    # #6 = trigger
-    # #7
-    # #8
-    # #9 = current_10m
-    #
-    # Отже Start знаходиться на 8 свічок раніше.
-    s_ts = target_ts - 8 * 600 * 1000
-
-    start_index = None
-    for idx, candle in enumerate(candles_completed):
-        if int(candle[0]) == s_ts:
-            start_index = idx
-            break
-
-    if start_index is None:
-        return None
-
-    start = candles_completed[start_index]
-    sc = color(start)
-
-    if sc not in ("GREEN", "RED"):
-        return None
-
-    # Start повинен бути останньою свічкою
-    # своєї серії однакового кольору.
-    if start_index + 1 < len(candles_completed):
-        if color(candles_completed[start_index + 1]) == sc:
-            return None
-
-    # Знаходимо вже закриті #6, #7, #8.
-    c6_ts = target_ts - 3 * 600 * 1000
-    c7_ts = target_ts - 2 * 600 * 1000
-    c8_ts = target_ts - 1 * 600 * 1000
-
+    # #1 Start має бути рівно за 8 x 10 хв до #9.
+    start_ts = target_ts - 8 * 10 * 60 * 1000
     candle_map = {int(c[0]): c for c in candles_completed}
 
-    if c6_ts not in candle_map:
+    if start_ts not in candle_map:
         return None
 
-    if c7_ts not in candle_map:
+    start = candle_map[start_ts]
+    cs = color(start)
+    if cs not in ('GREEN', 'RED'):
         return None
 
-    if c8_ts not in candle_map:
+    # Start має бути останньою свічкою своєї серії.
+    next_ts = start_ts + 10 * 60 * 1000
+    if next_ts in candle_map and color(candle_map[next_ts]) == cs:
+        return None
+
+    # Точні #6, #7, #8 перед живою #9.
+    c6_ts = target_ts - 3 * 10 * 60 * 1000
+    c7_ts = target_ts - 2 * 10 * 60 * 1000
+    c8_ts = target_ts - 1 * 10 * 60 * 1000
+
+    if c6_ts not in candle_map or c7_ts not in candle_map or c8_ts not in candle_map:
         return None
 
     c6 = candle_map[c6_ts]
     c7 = candle_map[c7_ts]
     c8 = candle_map[c8_ts]
+    c9 = current_10m
 
-    c6c = color(c6)
-    c7c = color(c7)
-    c8c = color(c8)
-    c9c = color(current_10m)
+    c6c, c7c, c8c, c9c = color(c6), color(c7), color(c8), color(c9)
 
-    # #6 повинен змінити колір відносно Start.
-    if c6c not in ("GREEN", "RED"):
+    if c6c not in ('GREEN', 'RED') or c6c == cs:
+        return None
+    if c7c != c6c or c8c != c6c or c9c != c6c:
         return None
 
-    if c6c == sc:
+    c9_close_ms = target_ts + 10 * 60 * 1000
+    remaining = (c9_close_ms - now_ms()) / 1000.0
+
+    if not (0 < remaining <= 60):
         return None
 
-    # #7 і #8 повинні залишатися кольором #6.
-    if c7c != c6c:
-        return None
-
-    if c8c != c6c:
-        return None
-
-    # Жива #9 також повинна бути такого самого кольору.
-    if c9c != c6c:
-        return None
-
-    side = "LONG" if sc == "GREEN" else "SHORT"
-
-    # PRE для цієї #9 не дублюється на рівні process()
-    # через warning_keys.
     return {
-        "side": side,
-        "start_color": sc,
-        "c6": c6,
-        "c7": c7,
-        "c8": c8,
-        "c9": current_10m,
-        "close_ms": target_ts + 10 * 60 * 1000,
+        'side': 'LONG' if cs == 'GREEN' else 'SHORT',
+        'start_color': cs,
+        'c6': c6,
+        'c7': c7,
+        'c8': c8,
+        'c9': c9,
+        'close_ms': c9_close_ms,
     }
 
 
