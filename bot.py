@@ -1,528 +1,322 @@
-import os
-import time
+import os, json, time, logging
+from collections import OrderedDict
 from datetime import datetime, timezone
-import ccxt
+from zoneinfo import ZoneInfo
 import requests
+from dotenv import load_dotenv
 
-SYMBOLS = ["BTC/USDT:USDT", "ETH/USDT:USDT"]
-DISPLAY_TIMEFRAME = "10m"
-SOURCE_TIMEFRAME = "5m"
-SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "30"))
-LEVERAGE = int(os.getenv("LEVERAGE", "30"))
-HISTORY_5M = int(os.getenv("HISTORY_5M", "240"))
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "")).strip()
+load_dotenv()
+TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
+CHAT_IDS=[x.strip() for x in os.getenv('TELEGRAM_CHAT_ID','').split(',') if x.strip()]
+SYMBOLS=[x.strip().upper() for x in os.getenv('MEXC_SYMBOLS','ETH_USDT,BTC_USDT').split(',') if x.strip()]
+POLL=int(os.getenv('POLL_SECONDS','15'))
+STATE_FILE=os.getenv('STATE_FILE','state.json')
+URL='https://api.mexc.com/api/v1/contract/kline/{symbol}'
 
-exchange = ccxt.mexc({
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap"},
-})
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+log=logging.getLogger('eth-bot')
 
-sent_keys = set()
-warning_keys = set()
-signal_keys = set()
-last_error = {}
+def utc(ts):
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
-
-def now_ms():
-    return int(time.time() * 1000)
-
-
-def utc_text(ms):
-    return datetime.fromtimestamp(
-        ms / 1000,
-        tz=timezone.utc
-    ).strftime("%Y-%m-%d %H:%M:%S UTC")
-
+def kyiv(ts):
+    return datetime.fromtimestamp(ts, tz=ZoneInfo('Europe/Kyiv')).strftime('%Y-%m-%d %H:%M')
 
 def color(c):
-    o, cl = float(c[1]), float(c[4])
-    return "GREEN" if cl > o else "RED" if cl < o else "DOJI"
+    return 'GREEN' if c['close'] > c['open'] else 'RED' if c['close'] < c['open'] else 'DOJI'
 
+def load_state(path=None):
+    path=path or STATE_FILE
+    try:
+        with open(path, encoding='utf8') as f:
+            return json.load(f)
+    except Exception:
+        return {'last_processed_10m': None, 'pending': []}
 
-def emoji(c):
-    return "🟢" if c == "GREEN" else "🔴" if c == "RED" else "⚪"
+def save_state(s, path=None):
+    path=path or STATE_FILE
+    with open(path + '.tmp', 'w', encoding='utf8') as f:
+        json.dump(s, f, indent=2)
+    os.replace(path + '.tmp', path)
 
+def tg(text, group_text=None):
+    if not TOKEN or not CHAT_IDS:
+        log.error('TELEGRAM NOT CONFIGURED')
+        return False
+    sent=0
+    for chat_id in CHAT_IDS:
+        try:
+            send_text = group_text if (group_text is not None and chat_id.startswith('-')) else text
+            r=requests.post(
+                f'https://api.telegram.org/bot{TOKEN}/sendMessage',
+                json={'chat_id': chat_id, 'text': send_text},
+                timeout=15
+            )
+            if r.ok and r.json().get('ok'):
+                sent += 1
+                log.info('TELEGRAM SENT OK | chat=%s', chat_id)
+            else:
+                log.error('TELEGRAM ERROR | chat=%s | status=%s body=%s', chat_id, r.status_code, r.text[:300])
+        except Exception as e:
+            log.exception('TELEGRAM EXCEPTION | chat=%s: %s', chat_id, e)
+    return sent == len(CHAT_IDS)
 
-def build_10m(candles5):
-    by_ts = {int(c[0]): c for c in candles5}
-    out = []
-    five = 5 * 60 * 1000
-    now = now_ms()
-
-    for ts, a in sorted(by_ts.items()):
-        minute = (ts // 60000) % 60
-
-        if minute % 10 != 0 or ts % 60000 != 0:
-            continue
-
-        b = by_ts.get(ts + five)
-
-        if b is None or ts + 2 * five > now:
-            continue
-
-        out.append([
-            ts,
-            float(a[1]),
-            max(float(a[2]), float(b[2])),
-            min(float(a[3]), float(b[3])),
-            float(b[4]),
-            float(a[5]) + float(b[5]),
-        ])
-
+def fetch(symbol):
+    r=requests.get(
+        URL.format(symbol=symbol),
+        params={'interval':'Min1', 'limit':300, '_ts':int(time.time()*1000)},
+        headers={'Cache-Control':'no-cache', 'Pragma':'no-cache', 'User-Agent':'ETHUSDT-10m-Signal-Bot/4.0'},
+        timeout=15
+    )
+    r.raise_for_status()
+    p=r.json()
+    data=p.get('data')
+    if not data:
+        raise RuntimeError(f'MEXC empty response: {p}')
+    out=[]
+    if isinstance(data, dict) and isinstance(data.get('time'), list):
+        times=data['time']; opens=data.get('open',[]); closes=data.get('close',[])
+        for i,t in enumerate(times):
+            out.append({'ts':int(t), 'open':float(opens[i]), 'close':float(closes[i])})
+    elif isinstance(data, list):
+        for row in data:
+            if isinstance(row, dict):
+                out.append({'ts':int(row.get('time',row.get('t'))), 'open':float(row.get('open',row.get('o'))), 'close':float(row.get('close',row.get('c')))})
+            else:
+                out.append({'ts':int(row[0]), 'open':float(row[1]), 'close':float(row[2])})
+    else:
+        raise RuntimeError(f'Unknown MEXC data format: {type(data).__name__}')
+    out.sort(key=lambda x:x['ts'])
     return out
 
-
-def build_current_10m(raw5):
-    if len(raw5) < 2:
+def current_10m(mins):
+    """Build the currently forming 10m candle from 1m data."""
+    if not mins:
         return None
-
-    by_ts = {int(c[0]): c for c in raw5}
-    now = now_ms()
-    five = 5 * 60 * 1000
-
-    latest = None
-
-    for ts in sorted(by_ts):
-        minute = (ts // 60000) % 60
-
-        if minute % 10 != 0:
-            continue
-
-        b = by_ts.get(ts + five)
-
-        if b is not None and ts <= now < ts + 2 * five:
-            latest = (ts, by_ts[ts], b)
-
-    if latest is None:
+    b=(mins[-1]['ts']//600)*600
+    rows=[x for x in mins if (x['ts']//600)*600==b]
+    if not rows:
         return None
-
-    ts, a, b = latest
-
-    return [
-        ts,
-        float(a[1]),
-        max(float(a[2]), float(b[2])),
-        min(float(a[3]), float(b[3])),
-        float(b[4]),
-        float(a[5]) + float(b[5]),
-    ]
-
-
-def fetch_raw_5m(symbol):
-    return exchange.fetch_ohlcv(
-        symbol,
-        SOURCE_TIMEFRAME,
-        limit=max(HISTORY_5M, 260)
-    )
-
-
-def find_signal(candles):
-    if len(candles) < 10:
-        return None
-
-    i = len(candles) - 10
-
-    start = candles[i]
-    c6 = candles[i + 6]
-    c7 = candles[i + 7]
-    c8 = candles[i + 8]
-    c9 = candles[i + 9]
-
-    cs = color(start)
-    c6c = color(c6)
-    c7c = color(c7)
-    c8c = color(c8)
-    c9c = color(c9)
-
-    if cs not in ("GREEN", "RED"):
-        return None
-
-    if c6c not in ("GREEN", "RED"):
-        return None
-
-    # Start must be the LAST candle of the same-color run.
-    if i + 1 < len(candles):
-        if color(candles[i + 1]) == cs:
-            return None
-
-    # #6 must change color.
-    if c6c == cs:
-        return None
-
-    # #7, #8, #9 must remain the same color as #6.
-    if not (
-        c7c == c6c
-        and c8c == c6c
-        and c9c == c6c
-    ):
-        return None
-
-    # Direction is determined by Start color.
-    side = "LONG" if cs == "GREEN" else "SHORT"
-
-    return {
-        "side": side,
-        "start": start,
-        "c6": c6,
-        "c7": c7,
-        "c8": c8,
-        "c9": c9,
-        "start_color": cs,
-    }
-
-
-def check_pre_signal(candles):
-    return None
-
-
-def pre_signal(candles_completed, current_10m):
-    """PRE-ALERT тільки в останню хвилину саме живої #9."""
-    if current_10m is None or len(candles_completed) < 8:
-        return None
-
-    target_ts = int(current_10m[0])
-    now = time.time()
-    elapsed = now - target_ts / 1000.0
-
-    # Жива #9: PRE тільки 540-600 сек після її початку.
-    if elapsed < 540 or elapsed >= 600:
-        return None
-
-    # #9 не може бути вже закритою.
-    if any(int(c[0]) == target_ts for c in candles_completed):
-        return None
-
-    # #1 Start має бути рівно за 8 x 10 хв до #9.
-    start_ts = target_ts - 8 * 10 * 60 * 1000
-    candle_map = {int(c[0]): c for c in candles_completed}
-
-    if start_ts not in candle_map:
-        return None
-
-    start = candle_map[start_ts]
-    cs = color(start)
-    if cs not in ('GREEN', 'RED'):
-        return None
-
-    # Start має бути останньою свічкою своєї серії.
-    next_ts = start_ts + 10 * 60 * 1000
-    if next_ts in candle_map and color(candle_map[next_ts]) == cs:
-        return None
-
-    # Точні #6, #7, #8 перед живою #9.
-    c6_ts = target_ts - 3 * 10 * 60 * 1000
-    c7_ts = target_ts - 2 * 10 * 60 * 1000
-    c8_ts = target_ts - 1 * 10 * 60 * 1000
-
-    if c6_ts not in candle_map or c7_ts not in candle_map or c8_ts not in candle_map:
-        return None
-
-    c6 = candle_map[c6_ts]
-    c7 = candle_map[c7_ts]
-    c8 = candle_map[c8_ts]
-    c9 = current_10m
-
-    c6c, c7c, c8c, c9c = color(c6), color(c7), color(c8), color(c9)
-
-    if c6c not in ('GREEN', 'RED') or c6c == cs:
-        return None
-    if c7c != c6c or c8c != c6c or c9c != c6c:
-        return None
-
-    c9_close_ms = target_ts + 10 * 60 * 1000
-    remaining = (c9_close_ms - now_ms()) / 1000.0
-
-    if not (0 < remaining <= 60):
-        return None
-
-    return {
-        'side': 'LONG' if cs == 'GREEN' else 'SHORT',
-        'start_color': cs,
-        'c6': c6,
-        'c7': c7,
-        'c8': c8,
-        'c9': c9,
-        'close_ms': c9_close_ms,
-    }
-
-
-def telegram(text):
-    if not TELEGRAM_BOT_TOKEN or not CHAT_ID:
-        print("[TELEGRAM] not configured", flush=True)
-        return False
-
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": CHAT_ID,
-                "text": text,
-                "disable_web_page_preview": True,
-            },
-            timeout=15,
-        )
-
-        if not r.ok:
-            print(
-                f"[TELEGRAM ERROR] {r.status_code}: {r.text}",
-                flush=True
-            )
-            return False
-
-        return True
-
-    except Exception as e:
-        print(f"[TELEGRAM ERROR] {e}", flush=True)
-        return False
-
-
-def warning_message(symbol, s):
-    coin = symbol.split("/")[0]
-
-    return (
-        "Всі готові?\n\n"
-        "Скоро дам СИГНАЛ!\n\n"
-        f"{coin}USDT Futures\n\n"
-        "Timeframe: 10m\n\n"
-        "⚠️ Сигнал буде тільки після закриття свічки."
-    )
-
-
-def message(symbol, s):
-    coin = symbol.split("/")[0]
-
-    side = s["side"]
-    c6 = s["c6"]
-    c7 = s["c7"]
-    c8 = s["c8"]
-    c9 = s["c9"]
-
-    entry = float(c9[4])
-
-    title = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
-
-    return (
-        f"{title}\n\n"
-        f"{coin}USDT Futures\n"
-        "Timeframe: 10m\n"
-        f"Leverage: {LEVERAGE}x\n\n"
-        "6→9 CONFIRMATION\n\n"
-        f"Start: {emoji(s['start_color'])} "
-        f"{s['start_color']}\n\n"
-        f"6: {emoji(color(c6))} {color(c6)}\n"
-        f"7: {emoji(color(c7))} {color(c7)}\n"
-        f"8: {emoji(color(c8))} {color(c8)}\n"
-        f"9: {emoji(color(c9))} {color(c9)}\n\n"
-        f"Entry: {entry}\n"
-        f"Signal candle #9 closed: {utc_text(c9[0])}\n\n"
-        "Трейдер Василь Павлів\n"
-        "@vasylpavliv\n"
-        "t.me/vasylpavliv"
-    )
-
-
-def process(symbol):
-    try:
-        raw = fetch_raw_5m(symbol)
-
-        completed = build_10m(raw)
-        current = build_current_10m(raw)
-
-        if len(completed) < 10:
-            raise RuntimeError(
-                f"not enough completed 10m candles: {len(completed)}"
-            )
-
-        # =========================================================
-        # 1. SIGNAL ПЕРЕВІРЯЄМО ПЕРШИМ
-        # =========================================================
-
-        s = find_signal(completed)
-
-        if s:
-            signal_key = (
-                symbol,
-                int(s["c9"][0])
-            )
-
-            # Запам'ятовуємо, що для цієї #9 вже є SIGNAL.
-            signal_keys.add(signal_key)
-
-            if signal_key not in sent_keys:
-
-                text = message(symbol, s)
-
-                if telegram(text):
-                    sent_keys.add(signal_key)
-
-                    print(
-                        "\n=== SIGNAL ===\n"
-                        + text
-                        + "\n==============\n",
-                        flush=True
-                    )
-
-        # =========================================================
-        # 2. PRE-ALERT
-        # =========================================================
-
-        warning = pre_signal(
-            completed,
-            current
-        )
-
-        if warning:
-
-            warning_key = (
-                symbol,
-                int(warning["c9"][0]),
-                "PRE"
-            )
-
-            signal_key = (
-                symbol,
-                int(warning["c9"][0])
-            )
-
-            # Якщо SIGNAL для цієї #9 вже був —
-            # PRE НЕ ВІДПРАВЛЯЄМО.
-            if signal_key in signal_keys:
-                return
-
-            if warning_key not in warning_keys:
-
-                text = warning_message(
-                    symbol,
-                    warning
-                )
-
-                if telegram(text):
-                    warning_keys.add(warning_key)
-
-                    print(
-                        "\n=== PRE-SIGNAL ===\n"
-                        + text
-                        + "\n=================\n",
-                        flush=True
-                    )
-
-    except Exception as e:
-
-        msg = str(e)
-
-        if last_error.get(symbol) != msg:
-
-            print(
-                f"[FETCH ERROR] {symbol}: {msg}",
-                flush=True
-            )
-
-            last_error[symbol] = msg
-
+    rows.sort(key=lambda x:x['ts'])
+    return {'ts':b, 'open':rows[0]['open'], 'close':rows[-1]['close'], 'count':len(rows)}
+
+def agg(mins):
+    buckets=OrderedDict()
+    for c in mins:
+        b=(c['ts']//600)*600
+        buckets.setdefault(b,[]).append(c)
+    now=int(time.time())
+    out=[]
+    for b,rows in buckets.items():
+        if b+600<=now and len(rows)>=9:
+            out.append({'ts':b, 'open':rows[0]['open'], 'close':rows[-1]['close'], 'count':len(rows)})
+    return out
+
+class Engine:
+    def __init__(self, state, state_file, symbol):
+        self.state=state
+        self.state_file=state_file
+        self.symbol=symbol
+        self.c=OrderedDict()
+        self.pending=[]
+        self.initialized=False
+        self.pre_alerted=set()
+
+    def seed(self, closed):
+        """Load current history without generating historical signals/results."""
+        self.c=OrderedDict((x['ts'], x) for x in closed[-150:])
+        self.c=OrderedDict(sorted(self.c.items()))
+        self.pending=[]
+        self.state['pending']=[]
+        self.state['last_processed_10m']=next(reversed(self.c)) if self.c else None
+        save_state(self.state, self.state_file)
+        self.initialized=True
+        if self.c:
+            latest=next(reversed(self.c.values()))
+            log.info('INITIALIZED | history=%d | latest=%s %s | waiting for NEW 10m candle', len(self.c), utc(latest['ts']), color(latest))
+
+    def maybe_pre_alert(self, live10):
+        """At ~1 minute before candle #9 closes, warn only while #6/#7/#8/#9 match."""
+        if not self.initialized or not live10:
+            return
+        # Only send during the final ~1 minute of the current 10m candle (#9).
+        now=time.time()
+        elapsed=now-live10['ts']
+        if elapsed < 540 or elapsed >= 600:
+            return
+
+        keys=list(self.c)
+        # Start is separate and is NOT counted.
+        # Current live candle is candle #9 after the candidate start.
+        target_ts=live10['ts']
+        if target_ts in self.c:
+            return
+        s_ts=target_ts-7*600
+        if s_ts not in self.c:
+            return
+        sidx=keys.index(s_ts)
+        start=self.c[s_ts]
+        sc=color(start)
+        if sc not in ('GREEN','RED'):
+            return
+        # Start must be the last candle of its same-color run.
+        if sidx+1 < len(keys) and color(self.c[keys[sidx+1]]) == sc:
+            return
+
+        c6_ts=target_ts-3*600
+        c7_ts=target_ts-2*600
+        c8_ts=target_ts-1*600
+        if c6_ts not in self.c or c7_ts not in self.c or c8_ts not in self.c:
+            return
+        trig=color(self.c[c6_ts])
+        if trig not in ('GREEN','RED') or trig == sc:
+            return
+        if color(self.c[c7_ts]) != trig:
+            return
+        if color(self.c[c8_ts]) != trig:
+            return
+        if color(live10) != trig:
+            return
+        if target_ts in self.pre_alerted:
+            return
+
+        log.info('PRE-SIGNAL | start=%s %s | live #9=%s %s | ~1m left', utc(start['ts']), sc, utc(target_ts), trig)
+        group_text=(f'**ÐÑÑ Ð³Ð¾ÑÐ¾Ð²Ñ?**\n'
+                     f'**Ð¡ÐºÐ¾ÑÐ¾ Ð´Ð°Ð¼ Ð¡ÐÐÐÐÐ!**\n\n'
+                     f'{self.symbol.replace("_USDT","USDT")} Futures\n'
+                     'Timeframe: 10m\n\n'
+                     'â ï¸ Ð¡Ð¸Ð³Ð½Ð°Ð» Ð±ÑÐ´Ðµ ÑÑÐ»ÑÐºÐ¸ Ð¿ÑÑÐ»Ñ Ð·Ð°ÐºÑÐ¸ÑÑÑ ÑÐ²ÑÑÐºÐ¸.')
+        # Pre-signal announcement is intended for the Telegram group only.
+        tg('', group_text)
+        self.pre_alerted.add(target_ts)
+
+    def ingest_new(self, closed):
+        if not self.initialized:
+            self.seed(closed)
+            return 0
+        known=set(self.c)
+        new=[x for x in closed if x['ts'] not in known]
+        for x in new:
+            self.c[x['ts']]=x
+        self.c=OrderedDict(sorted(self.c.items()))
+        while len(self.c)>150:
+            self.c.popitem(last=False)
+        for x in new:
+            self.evaluate(x['ts'])
+        if new:
+            self.state['pending']=self.pending
+            self.state['last_processed_10m']=new[-1]['ts']
+            save_state(self.state, self.state_file)
+        return len(new)
+
+    def evaluate(self, ts):
+        keys=list(self.c)
+        idx=keys.index(ts)
+        cur=self.c[ts]
+
+        # Pending signals: #6 is the trigger; #7, #8 and #9 must stay the
+        # same color as #6. Result control is ONLY candles #10..#15.
+        keep=[]
+        for p in self.pending:
+            rel=idx-p['trigger_idx']
+
+            # #7, #8 and #9 must match the trigger color. If any changes,
+            # the setup is invalid and no final signal is sent.
+            trigger_color=p['trigger_color']
+            if rel in (1, 2, 3):
+                if color(cur) != trigger_color:
+                    log.info('CANCEL SETUP | start=%s | trigger=%s | candle=%d changed color', utc(p['start_ts']), trigger_color, rel+6)
+                else:
+                    # After #9 closes successfully, send the final signal.
+                    if rel == 3 and not p.get('signal_sent', False):
+                        signal_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\nTrigger: candle 6\n\nSignal only - no automatic trading.\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
+                        signal_group_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\n\nSignal only - no automatic trading.\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
+                        tg(signal_text, signal_group_text)
+                        p['signal_sent']=True
+                    keep.append(p)
+                continue
+
+            # Result is checked only on candles #10..#15.
+            if rel < 4:
+                keep.append(p)
+                continue
+
+            want='GREEN' if p['direction']=='LONG' else 'RED'
+            if rel <= 9 and color(cur)==want:
+                log.info('RESULT WIN | %s | start=%s | result candle=%d', p['direction'], utc(p['start_ts']), rel+6)
+                tg(f"WIN\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nResult candle: {rel+6}/15\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv")
+            elif rel >= 9:
+                log.info('RESULT LOSS | %s | start=%s | no confirmation in candles 9-15', p['direction'], utc(p['start_ts']))
+                tg(f"LOSS\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nNo confirmation in candles 9-15\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv")
+            else:
+                keep.append(p)
+        self.pending=keep
+
+        # Start can be either:
+        #   1) an isolated GREEN/RED candle, or
+        #   2) the LAST candle of a consecutive run of the same color.
+        #
+        # Trigger is exactly the 6th subsequent candle. Candles #7, #8 and #9
+        # must keep the same color as the trigger. Candles #10..#15 are
+        # reserved only for the result check.
+        if idx<6:
+            return
+        sidx=idx-6
+        start=self.c[keys[sidx]]
+        sc=color(start)
+        if sc not in ('GREEN','RED'):
+            return
+
+        # If the next candle has the same color, this is NOT the last candle
+        # of the run, so this candidate start is ignored. If the next candle
+        # is opposite color or DOJI, this candle IS the last one of its run.
+        if sidx+1 < len(keys) and color(self.c[keys[sidx+1]]) == sc:
+            return
+
+        trig=color(self.c[keys[idx]])
+        direction='LONG' if sc=='GREEN' and trig=='RED' else 'SHORT' if sc=='RED' and trig=='GREEN' else None
+        if not direction:
+            return
+        if any(p['start_ts']==start['ts'] for p in self.pending):
+            return
+        log.info('TRIGGER CANDIDATE %s | start=%s %s | trigger=%s %s | waiting for #7-#9', direction, utc(start['ts']), sc, utc(ts), trig)
+        self.pending.append({'start_ts':start['ts'], 'trigger_idx':idx, 'trigger_color':trig, 'direction':direction, 'signal_sent':False})
+
+engines={}
+for sym in SYMBOLS:
+    sf=os.getenv(f'STATE_FILE_{sym}', f'state_{sym}.json')
+    engines[sym]=Engine(load_state(sf), sf, sym)
 
 def main():
-
-    print(
-        "=== BTC + ETH 10m 6-9 CONFIRMATION BOT STARTING ===",
-        flush=True
-    )
-
-    print(
-        "Imports OK",
-        flush=True
-    )
-
-    print(
-        f"Symbols: {', '.join(SYMBOLS)}",
-        flush=True
-    )
-
-    print(
-        "Timeframe: 10m (built from closed 5m candles)",
-        flush=True
-    )
-
-    print(
-        "Rule: Start color sets direction; "
-        "6th changes color; 7th-9th stay same as 6th",
-        flush=True
-    )
-
-    print(
-        "Pre-signal: last 60 sec of #9 "
-        "when current #9 still matches #6",
-        flush=True
-    )
-
-    print(
-        f"Leverage: {LEVERAGE}x",
-        flush=True
-    )
-
-    print(
-        "Telegram configured: "
-        f"{bool(TELEGRAM_BOT_TOKEN and CHAT_ID)}",
-        flush=True
-    )
-
-    print(
-        f"Chat ID configured: "
-        f"{CHAT_ID or 'NO'}",
-        flush=True
-    )
-
-    print(
-        "Connecting to MEXC...",
-        flush=True
-    )
-
-    exchange.load_markets()
-
-    print(
-        f"MEXC connected. Markets loaded: "
-        f"{len(exchange.markets)}",
-        flush=True
-    )
-
-    print(
-        "=== BTC + ETH 10m 6-9 CONFIRMATION BOT RUNNING ===",
-        flush=True
-    )
-
-    n = 0
-
+    log.info('Started BTCUSDT + ETHUSDT 10m signal bot v4-fixed (REST polling)')
+    log.info('Config: poll=%ss, chats=%d, token_configured=%s', POLL, len(CHAT_IDS), bool(TOKEN))
+    log.info('Symbols: %s', ', '.join(SYMBOLS))
+    log.info('Rule: #1 Start | #6 trigger | #7-#9 same color as #6 | #10-#15 result')
+    if TOKEN and CHAT_IDS:
+        tg('BOT ONLINE\nBTCUSDT + ETHUSDT Futures\nSignal bot is active.\nThis test confirms Telegram delivery to all configured chats.')
+    last_log={}
     while True:
+        for symbol,engine in engines.items():
+            try:
+                mins=fetch(symbol)
+                live10=current_10m(mins)
+                if live10:
+                    engine.maybe_pre_alert(live10)
+                closed=agg(mins)
+                if not closed:
+                    log.warning('%s | MEXC OK but no closed 10m candles yet', symbol)
+                else:
+                    latest=closed[-1]
+                    n=engine.ingest_new(closed)
+                    if n:
+                        log.info('NEW DATA | %s | MEXC 1m=%d | closed_10m=%d | added=%d | latest=%s %s | O=%.4f C=%.4f | pending=%d', symbol, len(mins), len(closed), n, utc(latest['ts']), color(latest), latest['open'], latest['close'], len(engine.pending))
+                    elif time.time()-last_log.get(symbol,0)>=60:
+                        age=int(time.time()-(latest['ts']+600))
+                        log.info('HEARTBEAT OK | %s | MEXC 1m=%d | closed_10m=%d | latest=%s %s | age=%ss | pending=%d', symbol, len(mins), len(closed), utc(latest['ts']), color(latest), max(age,0), len(engine.pending))
+                        last_log[symbol]=time.time()
+            except Exception as e:
+                log.exception('LOOP ERROR %s: %s', symbol, e)
+        time.sleep(POLL)
 
-        t = time.time()
-
-        for symbol in SYMBOLS:
-            process(symbol)
-
-        n += 1
-
-        if n % 10 == 0:
-            print(
-                "[HEARTBEAT] BTC+ETH 10m 6-9 BOT alive "
-                f"| scan={SCAN_SECONDS}s",
-                flush=True
-            )
-
-        elapsed = time.time() - t
-
-        sleep = max(
-            1,
-            SCAN_SECONDS - elapsed
-        )
-
-        print(
-            f"[CYCLE] completed in {elapsed:.1f}s "
-            f"| sleep {sleep:.1f}s",
-            flush=True
-        )
-
-        time.sleep(sleep)
-
-
-if __name__ == "__main__":
+if __name__=='__main__':
     main()
