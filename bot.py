@@ -151,7 +151,7 @@ class Engine:
         target_ts=live10['ts']
         if target_ts in self.c:
             return
-        s_ts=target_ts-7*600
+        s_ts=target_ts-9*600
         if s_ts not in self.c:
             return
         sidx=keys.index(s_ts)
@@ -181,11 +181,11 @@ class Engine:
             return
 
         log.info('PRE-SIGNAL | start=%s %s | live #9=%s %s | ~1m left', utc(start['ts']), sc, utc(target_ts), trig)
-        group_text=(f'**ÃÂÃÂÃÂ ÃÂ³ÃÂ¾ÃÂÃÂ¾ÃÂ²ÃÂ?**\n'
-                     f'**ÃÂ¡ÃÂºÃÂ¾ÃÂÃÂ¾ ÃÂ´ÃÂ°ÃÂ¼ ÃÂ¡ÃÂÃÂÃÂÃÂÃÂ!**\n\n'
+        group_text=(f'Всі готові?\n'
+                     f'Скоро дам СИГНАЛ!\n\n'
                      f'{self.symbol.replace("_USDT","USDT")} Futures\n'
                      'Timeframe: 10m\n\n'
-                     'Ã¢ÂÂ Ã¯Â¸Â ÃÂ¡ÃÂ¸ÃÂ³ÃÂ½ÃÂ°ÃÂ» ÃÂ±ÃÂÃÂ´ÃÂµ ÃÂÃÂÃÂ»ÃÂÃÂºÃÂ¸ ÃÂ¿ÃÂÃÂÃÂ»ÃÂ ÃÂ·ÃÂ°ÃÂºÃÂÃÂ¸ÃÂÃÂÃÂ ÃÂÃÂ²ÃÂÃÂÃÂºÃÂ¸.')
+                     '⚠️ Сигнал буде тільки після закриття свічки.')
         # Pre-signal announcement is intended for the Telegram group only.
         tg('', group_text)
         self.pre_alerted.add(target_ts)
@@ -215,7 +215,7 @@ class Engine:
         cur=self.c[ts]
 
         # Pending signals: #6 is the trigger; #7, #8 and #9 must stay the
-        # same color as #6. Result control is ONLY candles #10..#15.
+        # same color as #6. No WIN/LOSS result check.
         keep=[]
         for p in self.pending:
             rel=idx-p['trigger_idx']
@@ -229,11 +229,13 @@ class Engine:
                 else:
                     # After #9 closes successfully, send the final signal.
                     if rel == 3 and not p.get('signal_sent', False):
-                        signal_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\nTrigger: candle 6\n\nSignal only - no automatic trading.\n\nÃÂ¢ÃÂÃÂµÃÂ¹ÃÂ´ÃÂµÃÂ ÃÂÃÂ°ÃÂÃÂ¸ÃÂ»ÃÂ ÃÂÃÂ°ÃÂ²ÃÂ»ÃÂÃÂ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
-                        signal_group_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\n\nSignal only - no automatic trading.\n\nÃÂ¢ÃÂÃÂµÃÂ¹ÃÂ´ÃÂµÃÂ ÃÂÃÂ°ÃÂÃÂ¸ÃÂ»ÃÂ ÃÂÃÂ°ÃÂ²ÃÂ»ÃÂÃÂ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
+                        signal_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\nTrigger: candle 6\n\nSignal only - no automatic trading.\n\nТрейдер Василь Павлів\n@vasylpavliv\nhttps://t.me/vasylpavliv')
+                        signal_group_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\n\nSignal only - no automatic trading.\n\nТрейдер Василь Павлів\n@vasylpavliv\nhttps://t.me/vasylpavliv')
                         tg(signal_text, signal_group_text)
                         p['signal_sent']=True
                     continue
+                keep.append(p)
+                continue
 
             # No WIN/LOSS result check. The setup is completed after #9.
             if rel > 3:
@@ -245,8 +247,7 @@ class Engine:
         #   2) the LAST candle of a consecutive run of the same color.
         #
         # Trigger is exactly the 6th subsequent candle. Candles #7, #8 and #9
-        # must keep the same color as the trigger. Candles #10..#15 are
-        # reserved only for the result check.
+        # must keep the same color as the trigger. Signal is sent after #9.
         if idx<6:
             return
         sidx=idx-6
@@ -279,7 +280,7 @@ def main():
     log.info('Started BTCUSDT + ETHUSDT 10m signal bot v4-fixed (REST polling)')
     log.info('Config: poll=%ss, chats=%d, token_configured=%s', POLL, len(CHAT_IDS), bool(TOKEN))
     log.info('Symbols: %s', ', '.join(SYMBOLS))
-    log.info('Rule: #1 Start | #6 trigger | #7-#9 same color as #6 | #10-#15 result')
+    log.info('Rule: START | #1-#5 | #6 trigger | #7-#9 same color | PRE end of #9 | SIGNAL after #9')
     if TOKEN and CHAT_IDS:
         tg('BOT ONLINE\nBTCUSDT + ETHUSDT Futures\nSignal bot is active.\nThis test confirms Telegram delivery to all configured chats.')
     last_log={}
