@@ -177,12 +177,7 @@ def check_pre_signal(candles):
 
 
 def pre_signal(candles_completed, current_10m):
-    """
-    PRE-ALERT:
-    #9 is still forming.
-    Warning is sent only during the final 60 seconds
-    of candle #9.
-    """
+    """PRE-ALERT тільки в останню хвилину живої свічки #9."""
 
     if current_10m is None:
         return None
@@ -190,74 +185,111 @@ def pre_signal(candles_completed, current_10m):
     if len(candles_completed) < 8:
         return None
 
-    # Completed candles represent #2 ... #8.
-    seq8 = candles_completed[-8:]
+    # Поточна жива свічка повинна бути #9.
+    now = time.time()
+    target_ts = int(current_10m[0])
+    elapsed = now - (target_ts / 1000.0)
 
-    start = seq8[0]
-    c6 = seq8[5]
-    c7 = seq8[6]
-    c8 = seq8[7]
-    c9 = current_10m
+    # Попередження тільки в останні 60 секунд #9.
+    if elapsed < 540 or elapsed >= 600:
+        return None
 
-    cs = color(start)
+    # Якщо ця свічка вже є серед закритих —
+    # вона вже не є живою #9.
+    if any(int(c[0]) == target_ts for c in candles_completed):
+        return None
+
+    # Для #9:
+    #
+    # Start = #1
+    # #2
+    # #3
+    # #4
+    # #5
+    # #6 = trigger
+    # #7
+    # #8
+    # #9 = current_10m
+    #
+    # Отже Start знаходиться на 8 свічок раніше.
+    s_ts = target_ts - 8 * 600 * 1000
+
+    start_index = None
+    for idx, candle in enumerate(candles_completed):
+        if int(candle[0]) == s_ts:
+            start_index = idx
+            break
+
+    if start_index is None:
+        return None
+
+    start = candles_completed[start_index]
+    sc = color(start)
+
+    if sc not in ("GREEN", "RED"):
+        return None
+
+    # Start повинен бути останньою свічкою
+    # своєї серії однакового кольору.
+    if start_index + 1 < len(candles_completed):
+        if color(candles_completed[start_index + 1]) == sc:
+            return None
+
+    # Знаходимо вже закриті #6, #7, #8.
+    c6_ts = target_ts - 3 * 600 * 1000
+    c7_ts = target_ts - 2 * 600 * 1000
+    c8_ts = target_ts - 1 * 600 * 1000
+
+    candle_map = {int(c[0]): c for c in candles_completed}
+
+    if c6_ts not in candle_map:
+        return None
+
+    if c7_ts not in candle_map:
+        return None
+
+    if c8_ts not in candle_map:
+        return None
+
+    c6 = candle_map[c6_ts]
+    c7 = candle_map[c7_ts]
+    c8 = candle_map[c8_ts]
+
     c6c = color(c6)
     c7c = color(c7)
     c8c = color(c8)
-    c9c = color(c9)
+    c9c = color(current_10m)
 
-    if cs not in ("GREEN", "RED"):
-        return None
-
+    # #6 повинен змінити колір відносно Start.
     if c6c not in ("GREEN", "RED"):
         return None
 
-    if c9c not in ("GREEN", "RED"):
+    if c6c == sc:
         return None
 
-    # Start must be last candle of its same-color run.
-    if len(candles_completed) >= 9:
-        previous = candles_completed[-9]
-
-        if color(previous) == cs:
-            return None
-
-    # #6 must change color.
-    if c6c == cs:
+    # #7 і #8 повинні залишатися кольором #6.
+    if c7c != c6c:
         return None
 
-    # #7 and #8 must match #6.
-    if c7c != c6c or c8c != c6c:
+    if c8c != c6c:
         return None
 
-    # Current #9 must also match #6.
+    # Жива #9 також повинна бути такого самого кольору.
     if c9c != c6c:
         return None
 
-    # The current candle MUST be exactly #9 relative to Start.
-    expected_c9_ts = int(start[0]) + 8 * 10 * 60 * 1000
+    side = "LONG" if sc == "GREEN" else "SHORT"
 
-    if int(c9[0]) != expected_c9_ts:
-        return None
-
-    # #9 closes 10 minutes after its own start.
-    c9_close_ms = int(c9[0]) + 10 * 60 * 1000
-
-    remaining = (c9_close_ms - now_ms()) / 1000.0
-
-    # PRE only during the last 60 seconds of #9.
-    if not (0 < remaining <= 60):
-        return None
-
-    side = "LONG" if cs == "GREEN" else "SHORT"
-
+    # PRE для цієї #9 не дублюється на рівні process()
+    # через warning_keys.
     return {
         "side": side,
-        "start_color": cs,
+        "start_color": sc,
         "c6": c6,
         "c7": c7,
         "c8": c8,
-        "c9": c9,
-        "close_ms": c9_close_ms,
+        "c9": current_10m,
+        "close_ms": target_ts + 10 * 60 * 1000,
     }
 
 
@@ -335,6 +367,7 @@ def message(symbol, s):
         "t.me/vasylpavliv"
     )
 
+
 def process(symbol):
     try:
         raw = fetch_raw_5m(symbol)
@@ -360,7 +393,6 @@ def process(symbol):
             )
 
             # Запам'ятовуємо, що для цієї #9 вже є SIGNAL.
-            # Це головний захист від SIGNAL -> PRE.
             signal_keys.add(signal_key)
 
             if signal_key not in sent_keys:
@@ -464,7 +496,7 @@ def main():
     )
 
     print(
-        "Pre-signal: 1-3 min before #9 close "
+        "Pre-signal: last 60 sec of #9 "
         "when current #9 still matches #6",
         flush=True
     )
