@@ -1,24 +1,34 @@
-# BTC + ETH 10m 6→9 Confirmation Bot V4
+# MEXC ENTRY POINT BOT — 30 COINS
 
-Railway signal-only bot for BTCUSDT and ETHUSDT Futures.
+Окремий Telegram-бот для пошуку точки входу на MEXC Futures.
 
-## Logic
-- 10m candles are built from 5m MEXC candles.
-- Start candle is the last candle in a same-color run.
-- GREEN Start => LONG.
-- RED Start => SHORT.
-- Candle 6 must change color from Start.
-- Candles 7, 8, 9 must remain the same color as candle 6.
-- Final signal is sent only after candle 9 closes.
-- About 2 minutes before candle 9 closes, if the currently forming candle 9 still matches candle 6, a pre-signal warning is sent.
-- If candle 9 changes color before close, no final signal is sent.
-- Warning and final signal are deduplicated.
-- Display leverage is 30x by default.
-- No MEXC API keys are required; only public market data is used.
+Логіка:
+1. 1H визначає напрямок структури.
+2. 1H шукає supply/demand zone.
+3. 15m чекає sweep ліквідності.
+4. Після sweep потрібен CHoCH/BOS.
+5. Шукається POI/FVG.
+6. Розраховуються Entry, SL, TP1, TP2 і RR.
+7. Сигнал відправляється в Telegram тільки після проходження всіх фільтрів.
 
-## Railway variables
-TELEGRAM_BOT_TOKEN=your_bot_token
-CHAT_ID=-5370612713
-LEVERAGE=30
-SCAN_SECONDS=30
-HISTORY_5M=240
+30 монет:
+BTC ETH SOL XRP DOGE SUI AVAX LINK DOT LTC
+APT ARB OP PEPE WIF INJ FIL ATOM UNI TON
+SEI TRX NEAR PYTH ADA ENA BNB BCH ETC XLM
+
+ВАЖЛИВО:
+- Бот НЕ відкриває угоди і НЕ має торгового API-ключа.
+- Telegram token не вшитий у код навмисно. Старий токен, який був опублікований у чаті, вважай скомпрометованим і створи новий через BotFather.
+- TELEGRAM_CHAT_ID вже заданий: -5417788354.
+- MEXC Futures API зараз використовує https://api.mexc.com.
+
+Railway:
+1. Завантаж цей ZIP у новий service.
+2. Variables -> додай TELEGRAM_BOT_TOKEN зі свіжим токеном BotFather.
+3. TELEGRAM_CHAT_ID залиш -5417788354.
+4. Start command: python main.py
+
+Перш ніж використовувати сигнали на реальних грошах, перевір їх на історичних даних/демо-режимі. Стратегія не гарантує прибуток.
+
+## API rate-limit fix
+The scanner uses a shared request gate, retries MEXC 510 with exponential backoff, and limits worker concurrency to reduce burst traffic.
