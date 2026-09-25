@@ -146,12 +146,12 @@ class Engine:
             return
 
         keys=list(self.c)
-        # Start is separate and is NOT counted.
-        # Current live candle is candle #9 after the candidate start.
+        # START is separate and is NOT counted.
+        # Current live candle is candle #9 after START.
         target_ts=live10['ts']
         if target_ts in self.c:
             return
-        s_ts=target_ts-7*600
+        s_ts=target_ts-9*600
         if s_ts not in self.c:
             return
         sidx=keys.index(s_ts)
@@ -159,7 +159,7 @@ class Engine:
         sc=color(start)
         if sc not in ('GREEN','RED'):
             return
-        # Start must be the last candle of its same-color run.
+        # START must be the last candle of its same-color run.
         if sidx+1 < len(keys) and color(self.c[keys[sidx+1]]) == sc:
             return
 
@@ -229,8 +229,8 @@ class Engine:
                 else:
                     # After #9 closes successfully, send the final signal.
                     if rel == 3 and not p.get('signal_sent', False):
-                        signal_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\nTrigger: candle 6\n\nSignal only - no automatic trading.\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
-                        signal_group_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\n\nSignal only - no automatic trading.\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
+                        signal_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\nTrigger: candle 6\n\nSignal only - no automatic trading.\n\nÃÂ¢ÃÂÃÂµÃÂ¹ÃÂ´ÃÂµÃÂ ÃÂÃÂ°ÃÂÃÂ¸ÃÂ»ÃÂ ÃÂÃÂ°ÃÂ²ÃÂ»ÃÂÃÂ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
+                        signal_group_text=(f'SIGNAL {p["direction"]}\n\n{self.symbol.replace("_USDT","USDT")} Futures\nTimeframe: 10m\nStart: {kyiv(p["start_ts"])} Kyiv time\n\nSignal only - no automatic trading.\n\nÃÂ¢ÃÂÃÂµÃÂ¹ÃÂ´ÃÂµÃÂ ÃÂÃÂ°ÃÂÃÂ¸ÃÂ»ÃÂ ÃÂÃÂ°ÃÂ²ÃÂ»ÃÂÃÂ²\n@vasylpavliv\nhttps://t.me/vasylpavliv')
                         tg(signal_text, signal_group_text)
                         p['signal_sent']=True
                     keep.append(p)
@@ -244,10 +244,10 @@ class Engine:
             want='GREEN' if p['direction']=='LONG' else 'RED'
             if rel <= 9 and color(cur)==want:
                 log.info('RESULT WIN | %s | start=%s | result candle=%d', p['direction'], utc(p['start_ts']), rel+6)
-                tg(f"WIN\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nResult candle: {rel+6}/15\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv")
+                tg(f"WIN\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nResult candle: {rel+6}/15\n\nÃÂ¢ÃÂÃÂµÃÂ¹ÃÂ´ÃÂµÃÂ ÃÂÃÂ°ÃÂÃÂ¸ÃÂ»ÃÂ ÃÂÃÂ°ÃÂ²ÃÂ»ÃÂÃÂ²\n@vasylpavliv\nhttps://t.me/vasylpavliv")
             elif rel >= 9:
                 log.info('RESULT LOSS | %s | start=%s | no confirmation in candles 9-15', p['direction'], utc(p['start_ts']))
-                tg(f"LOSS\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nNo confirmation in candles 9-15\n\nÐ¢ÑÐµÐ¹Ð´ÐµÑ ÐÐ°ÑÐ¸Ð»Ñ ÐÐ°Ð²Ð»ÑÐ²\n@vasylpavliv\nhttps://t.me/vasylpavliv")
+                tg(f"LOSS\n{self.symbol.replace('_USDT','USDT')} Futures\nDirection: {p['direction']}\nNo confirmation in candles 9-15\n\nÃÂ¢ÃÂÃÂµÃÂ¹ÃÂ´ÃÂµÃÂ ÃÂÃÂ°ÃÂÃÂ¸ÃÂ»ÃÂ ÃÂÃÂ°ÃÂ²ÃÂ»ÃÂÃÂ²\n@vasylpavliv\nhttps://t.me/vasylpavliv")
             else:
                 keep.append(p)
         self.pending=keep
